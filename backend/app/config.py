@@ -13,11 +13,27 @@ class Settings(BaseSettings):
     DATABASE_URL: str
     REDIS_URL: str
     
+    # Storage Configuration
+    # Provider: "local" for filesystem, "minio" for MinIO, "b2" for Backblaze B2
+    STORAGE_PROVIDER: str = "local"
+    
+    # Local Filesystem Storage (for development without S3)
+    LOCAL_STORAGE_PATH: str = "/app/storage"
+    LOCAL_STORAGE_BASE_URL: str = "http://localhost:8000/files"
+    
+    # MinIO Configuration (local S3-compatible)
     MINIO_ENDPOINT: str = "localhost:9000"
-    MINIO_ACCESS_KEY: str
-    MINIO_SECRET_KEY: str
+    MINIO_ACCESS_KEY: str = ""
+    MINIO_SECRET_KEY: str = ""
     MINIO_USE_SSL: bool = False
     MINIO_BUCKET: str = "seoman-files"
+    
+    # Backblaze B2 Configuration (production)
+    B2_ENDPOINT: str = ""
+    B2_KEY_ID: str = ""
+    B2_APPLICATION_KEY: str = ""
+    B2_BUCKET: str = ""
+    B2_REGION: str = "us-west-004"
     
     LLM_PROVIDER: str = "local"
     LLM_BASE_URL: str = "http://localhost:1234/v1"

@@ -214,3 +214,109 @@ class DataForSEOClient:
             "MX": 2484,
         }
         return location_codes.get(country.upper(), 2840)
+    
+    def _get_location_name_code(self, location_name: str) -> int:
+        """Get location code from location name."""
+        location_name_codes = {
+            "united states": 2840,
+            "united kingdom": 2826,
+            "canada": 2124,
+            "australia": 2036,
+            "germany": 2276,
+            "france": 2250,
+            "spain": 2724,
+            "italy": 2380,
+            "brazil": 2076,
+            "mexico": 2484,
+        }
+        return location_name_codes.get(location_name.lower(), 2840)
+    
+    async def get_keyword_ideas(
+        self,
+        keyword: str,
+        location_name: str = "United States",
+        language_code: str = "en",
+        limit: int = 100,
+    ) -> dict:
+        """
+        Alias for keywords_for_keywords with single keyword.
+        Returns format expected by keyword_tasks.py.
+        """
+        try:
+            keywords = await self.keywords_for_keywords(
+                seed_keywords=[keyword],
+                country=self._country_from_location(location_name),
+                language=language_code,
+                limit=limit,
+            )
+            return {
+                "success": True,
+                "keywords": keywords,
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "keywords": [],
+            }
+    
+    async def get_serp(
+        self,
+        keyword: str,
+        location_name: str = "United States",
+        language_code: str = "en",
+    ) -> dict:
+        """
+        Get SERP results for a keyword.
+        Returns format expected by keyword_tasks.py.
+        """
+        try:
+            data = [{
+                "keyword": keyword,
+                "location_code": self._get_location_name_code(location_name),
+                "language_code": language_code,
+                "depth": 100,
+            }]
+            
+            result = await self._request("POST", "/serp/google/organic/live/regular", data)
+            
+            organic = []
+            if result.get("tasks"):
+                for task in result["tasks"]:
+                    if task.get("result"):
+                        for item in task["result"]:
+                            for res in item.get("items", []):
+                                if res.get("type") == "organic":
+                                    organic.append({
+                                        "url": res.get("url", ""),
+                                        "title": res.get("title", ""),
+                                        "description": res.get("description", ""),
+                                        "position": res.get("rank_group"),
+                                    })
+            
+            return {
+                "success": True,
+                "organic": organic,
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "organic": [],
+            }
+    
+    def _country_from_location(self, location_name: str) -> str:
+        """Convert location name to country code."""
+        location_to_country = {
+            "united states": "US",
+            "united kingdom": "GB",
+            "canada": "CA",
+            "australia": "AU",
+            "germany": "DE",
+            "france": "FR",
+            "spain": "ES",
+            "italy": "IT",
+            "brazil": "BR",
+            "mexico": "MX",
+        }
+        return location_to_country.get(location_name.lower(), "US")

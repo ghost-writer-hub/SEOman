@@ -10,20 +10,24 @@ External service integrations for SEOman.
 from app.integrations.seoanalyzer import SEOAnalyzerClient
 from app.integrations.dataforseo import DataForSEOClient
 from app.integrations.llm import LLMClient, get_llm_client, Message, LLMResponse
-from app.integrations.storage import StorageClient, get_storage_client, SEOmanStoragePaths
+from app.integrations.storage import (
+    BaseStorageClient,
+    LocalStorageClient,
+    S3StorageClient,
+    get_storage_client,
+    SEOmanStoragePaths,
+)
 
 __all__ = [
-    # SEO Analyzer
     "SEOAnalyzerClient",
-    # DataForSEO
     "DataForSEOClient",
-    # LLM
     "LLMClient",
     "get_llm_client",
     "Message",
     "LLMResponse",
-    # Storage
-    "StorageClient",
+    "BaseStorageClient",
+    "LocalStorageClient",
+    "S3StorageClient",
     "get_storage_client",
     "SEOmanStoragePaths",
 ]

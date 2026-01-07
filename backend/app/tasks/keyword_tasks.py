@@ -14,7 +14,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session_maker
-from app.models.keyword import Keyword, KeywordCluster
+from app.models.keyword import Keyword, KeywordCluster, KeywordGap
 from app.models.site import Site
 from app.integrations.dataforseo import DataForSEOClient
 from app.integrations.llm import get_llm_client, cluster_keywords
@@ -78,38 +78,33 @@ async def _discover_keywords(
                     keywords_data = result.get("keywords", [])
                     all_keywords.extend(keywords_data)
             
-            # Deduplicate by keyword text
-            seen = set()
+            seen: set[str] = set()
             unique_keywords = []
             for kw in all_keywords:
-                text = kw.get("keyword", "").lower()
+                text = (kw.get("text") or kw.get("keyword", "")).lower()
                 if text and text not in seen:
                     seen.add(text)
                     unique_keywords.append(kw)
             
-            # Save keywords to database
             saved_count = 0
             for kw_data in unique_keywords:
-                # Check if already exists
+                kw_text = kw_data.get("text") or kw_data.get("keyword", "")
                 stmt = select(Keyword).where(
                     Keyword.site_id == site.id,
-                    Keyword.keyword == kw_data.get("keyword"),
+                    Keyword.text == kw_text,
                 )
                 result = await session.execute(stmt)
                 existing = result.scalar_one_or_none()
                 
                 if existing:
-                    # Update existing
                     existing.search_volume = kw_data.get("search_volume")
                     existing.cpc = kw_data.get("cpc")
                     existing.competition = kw_data.get("competition")
                     existing.updated_at = datetime.utcnow()
                 else:
-                    # Create new
                     keyword = Keyword(
                         site_id=site.id,
-                        tenant_id=UUID(tenant_id),
-                        keyword=kw_data.get("keyword"),
+                        text=kw_text,
                         search_volume=kw_data.get("search_volume"),
                         cpc=kw_data.get("cpc"),
                         competition=kw_data.get("competition"),
@@ -171,10 +166,9 @@ async def _update_keyword_rankings(task, site_id: str, tenant_id: str):
                 if serp_result.get("success"):
                     organic = serp_result.get("organic", [])
                     
-                    # Find our position
                     position = None
                     for i, item in enumerate(organic, 1):
-                        if site.url in item.get("url", ""):
+                        if site.primary_domain in item.get("url", ""):
                             position = i
                             break
                     
@@ -244,8 +238,7 @@ async def _cluster_site_keywords(site_id: str, tenant_id: str):
         if len(keywords) < 3:
             return {"message": "Not enough keywords to cluster"}
         
-        # Get keyword texts
-        keyword_texts = [kw.keyword for kw in keywords]
+        keyword_texts = [str(kw.text) for kw in keywords]
         
         try:
             llm = get_llm_client()
@@ -258,22 +251,18 @@ async def _cluster_site_keywords(site_id: str, tenant_id: str):
             
             clusters_created = 0
             for cluster_data in cluster_result.get("clusters", []):
-                # Create or update cluster
                 cluster = KeywordCluster(
                     site_id=site.id,
-                    tenant_id=UUID(tenant_id),
-                    name=cluster_data.get("name"),
-                    intent=cluster_data.get("intent"),
-                    recommended_content_type=cluster_data.get("recommended_content_type"),
+                    label=cluster_data.get("name", "Unnamed Cluster"),
+                    description=cluster_data.get("description"),
                 )
                 session.add(cluster)
                 await session.flush()
                 
-                # Assign keywords to cluster
-                cluster_keyword_texts = cluster_data.get("keywords", [])
+                cluster_keyword_texts = [k.lower() for k in cluster_data.get("keywords", [])]
                 for kw in keywords:
-                    if kw.keyword.lower() in [k.lower() for k in cluster_keyword_texts]:
-                        kw.cluster_id = cluster.id
+                    if str(kw.text).lower() in cluster_keyword_texts:
+                        kw.clusters.append(cluster)
                 
                 clusters_created += 1
             
@@ -315,13 +304,92 @@ async def _analyze_keyword_gaps(
         try:
             client = DataForSEOClient()
             
-            # This would use DataForSEO's competitor analysis
-            # For now, return placeholder
+            our_keywords: set[str] = set()
+            our_data = await client.keywords_for_site(
+                domain=str(site.primary_domain),
+                country="US",
+                limit=500,
+            )
+            for kw in our_data:
+                if kw.get("text"):
+                    our_keywords.add(kw["text"].lower())
+            
+            competitor_keywords: Dict[str, Dict[str, Any]] = {}
+            for comp_url in competitor_urls:
+                comp_domain = comp_url.replace("https://", "").replace("http://", "").split("/")[0]
+                comp_data = await client.keywords_for_site(
+                    domain=comp_domain,
+                    country="US",
+                    limit=500,
+                )
+                for kw in comp_data:
+                    text = kw.get("text", "").lower()
+                    if not text:
+                        continue
+                    if text not in competitor_keywords:
+                        competitor_keywords[text] = {
+                            "keyword": text,
+                            "search_volume": kw.get("search_volume", 0),
+                            "difficulty": kw.get("difficulty"),
+                            "intent": kw.get("intent"),
+                            "competitors": [],
+                        }
+                    competitor_keywords[text]["competitors"].append(comp_domain)
+            
+            gaps = []
+            for kw_text, data in competitor_keywords.items():
+                if kw_text not in our_keywords and data["search_volume"] and data["search_volume"] > 50:
+                    priority = data["search_volume"] * len(data["competitors"])
+                    if data["difficulty"] and data["difficulty"] < 50:
+                        priority *= 1.5
+                    gaps.append({
+                        "keyword": data["keyword"],
+                        "search_volume": data["search_volume"],
+                        "difficulty": data["difficulty"],
+                        "intent": data["intent"],
+                        "competitor_count": len(data["competitors"]),
+                        "competitors": data["competitors"],
+                        "priority_score": priority,
+                    })
+            
+            gaps.sort(key=lambda x: x["priority_score"], reverse=True)
+            gaps = gaps[:100]
+            
+            for gap in gaps:
+                stmt = select(KeywordGap).where(
+                    KeywordGap.site_id == site.id,
+                    KeywordGap.keyword == gap["keyword"],
+                )
+                result = await session.execute(stmt)
+                existing = result.scalar_one_or_none()
+                
+                if existing:
+                    existing.search_volume = gap["search_volume"]
+                    existing.difficulty = gap["difficulty"]
+                    existing.intent = gap["intent"]
+                    existing.competitor_count = gap["competitor_count"]
+                    existing.competitors = gap["competitors"]
+                    existing.priority_score = gap["priority_score"]
+                else:
+                    keyword_gap = KeywordGap(
+                        site_id=site.id,
+                        keyword=gap["keyword"],
+                        search_volume=gap["search_volume"],
+                        difficulty=gap["difficulty"],
+                        intent=gap["intent"],
+                        competitor_count=gap["competitor_count"],
+                        competitors=gap["competitors"],
+                        priority_score=gap["priority_score"],
+                    )
+                    session.add(keyword_gap)
+            
+            await session.commit()
             
             return {
                 "site_id": site_id,
                 "competitors_analyzed": len(competitor_urls),
-                "gaps_found": 0,  # Placeholder
+                "gaps_found": len(gaps),
+                "top_gaps": gaps[:10],
             }
             
         except Exception as e:

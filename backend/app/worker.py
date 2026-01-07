@@ -26,6 +26,7 @@ celery_app = Celery(
         "app.tasks.keyword_tasks",
         "app.tasks.content_tasks",
         "app.tasks.export_tasks",
+        "app.tasks.pipeline_tasks",
     ],
 )
 

@@ -95,3 +95,6 @@ class ContentGenerationJob(BaseSchema):
     status: str
     message: str | None = None
     progress: int = 0
+
+
+ContentBriefDetail.model_rebuild()

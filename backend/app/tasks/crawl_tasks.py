@@ -2,21 +2,21 @@
 Crawl Tasks
 
 Background tasks for website crawling operations.
+Uses SEOman v2.0 crawler and audit engine.
 """
 
 import asyncio
 from datetime import datetime, timedelta
-from typing import Optional
 from uuid import UUID
 
 from celery import shared_task
-from sqlalchemy import select, update
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session_maker
-from app.models.crawl import CrawlJob, CrawlStatus, CrawlPage
+from app.models.crawl import CrawlJob, JobStatus, CrawlPage
 from app.models.site import Site
-from app.integrations.seoanalyzer import SEOAnalyzerClient
+from app.services.crawler import SEOmanCrawler, CrawlConfig, CrawledPage
 
 
 def run_async(coro):
@@ -31,7 +31,7 @@ def run_async(coro):
 
 @shared_task(bind=True, max_retries=3)
 def start_crawl(self, crawl_id: str, site_id: str, tenant_id: str):
-    """Start a new crawl job."""
+    """Start a new crawl job using SEOman v2.0 crawler."""
     return run_async(_start_crawl(self, crawl_id, site_id, tenant_id))
 
 
@@ -46,66 +46,111 @@ async def _start_crawl(task, crawl_id: str, site_id: str, tenant_id: str):
             return {"error": "Site or crawl not found"}
         
         # Update status to running
-        crawl.status = CrawlStatus.RUNNING
+        crawl.status = JobStatus.RUNNING
         crawl.started_at = datetime.utcnow()
         await session.commit()
         
         try:
-            # Use SEO Analyzer for crawling
-            analyzer = SEOAnalyzerClient()
+            # Get crawl configuration
+            config_data = crawl.config or {}
+            max_pages = config_data.get("max_pages", 100)
+            max_depth = config_data.get("max_depth", 10)
             
-            # Run analysis
-            result = await analyzer.analyze(
-                url=site.url,
-                follow_links=True,
-                max_pages=crawl.max_pages or 100,
+            # Create crawler config
+            config = CrawlConfig(
+                max_pages=max_pages,
+                max_depth=max_depth,
+                concurrent_requests=5,
+                request_delay_ms=100,
+                timeout_seconds=30,
+                respect_robots_txt=True,
+                store_html=True,
             )
             
-            if result.get("success"):
-                # Store pages
-                pages_data = result.get("pages", [])
-                for page_data in pages_data:
-                    page = CrawlPage(
-                        crawl_id=crawl.id,
-                        url=page_data.get("url", ""),
-                        status_code=page_data.get("status_code", 200),
-                        title=page_data.get("title"),
-                        meta_description=page_data.get("meta_description"),
-                        h1=page_data.get("h1"),
-                        word_count=page_data.get("word_count", 0),
-                        load_time_ms=page_data.get("load_time_ms"),
-                        issues=page_data.get("issues", []),
-                    )
-                    session.add(page)
-                
-                # Update crawl status
-                crawl.status = CrawlStatus.COMPLETED
-                crawl.completed_at = datetime.utcnow()
-                crawl.pages_crawled = len(pages_data)
-                crawl.issues_found = sum(
-                    len(p.get("issues", [])) for p in pages_data
-                )
-                
-            else:
-                crawl.status = CrawlStatus.FAILED
-                crawl.error_message = result.get("error", "Unknown error")
-                crawl.completed_at = datetime.utcnow()
+            # Build site URL
+            site_url = f"https://{site.primary_domain}"
+            
+            # Create and run crawler
+            crawler = SEOmanCrawler(
+                site_url=site_url,
+                config=config,
+                tenant_id=tenant_id,
+                site_id=site_id,
+                crawl_id=crawl_id,
+            )
+            
+            pages = await crawler.crawl()
+            
+            # Store pages in database
+            pages_stored = 0
+            issues_found = 0
+            
+            for page_data in pages:
+                crawl_page = _create_crawl_page(crawl.id, site.id, page_data)
+                session.add(crawl_page)
+                pages_stored += 1
+                issues_found += len(page_data.errors)
+            
+            # Update crawl status
+            crawl.status = JobStatus.COMPLETED
+            crawl.completed_at = datetime.utcnow()
+            crawl.pages_crawled = pages_stored
+            crawl.errors_count = issues_found
             
             await session.commit()
             
             return {
                 "crawl_id": crawl_id,
                 "status": crawl.status.value,
-                "pages_crawled": crawl.pages_crawled,
+                "pages_crawled": pages_stored,
+                "issues_found": issues_found,
             }
             
         except Exception as e:
-            crawl.status = CrawlStatus.FAILED
+            crawl.status = JobStatus.FAILED
             crawl.error_message = str(e)
             crawl.completed_at = datetime.utcnow()
             await session.commit()
             
             raise task.retry(exc=e, countdown=60)
+
+
+def _create_crawl_page(crawl_id: UUID, site_id: UUID, page: CrawledPage) -> CrawlPage:
+    """Convert CrawledPage dataclass to CrawlPage model."""
+    # Get first H1 as string for the model
+    h1_text = page.h1[0] if page.h1 else None
+    
+    return CrawlPage(
+        crawl_job_id=crawl_id,
+        site_id=site_id,
+        url=page.url,
+        status_code=page.status_code,
+        content_type=page.content_type,
+        canonical_url=page.canonical_url or None,
+        meta_robots=page.meta_robots or None,
+        title=page.title or None,
+        meta_description=page.meta_description or None,
+        h1=h1_text,
+        h2=page.h2,
+        h3=page.h3,
+        word_count=page.word_count,
+        internal_links=page.internal_links,
+        external_links=page.external_links,
+        noindex=page.noindex,
+        nofollow=page.nofollow,
+        load_time_ms=page.load_time_ms,
+        issues=page.errors,
+        raw_html_path=page.raw_html_path or None,
+        markdown_path=page.markdown_path or None,
+        structured_data=page.structured_data,
+        open_graph=page.open_graph,
+        hreflang=page.hreflang,
+        twitter_cards=page.twitter_cards,
+        images=page.images,
+        scripts_count=page.scripts_count,
+        stylesheets_count=page.stylesheets_count,
+        text_content_hash=page.text_content_hash or None,
+    )
 
 
 @shared_task(bind=True)
@@ -123,11 +168,11 @@ async def _check_stale_crawls():
         stmt = (
             update(CrawlJob)
             .where(
-                CrawlJob.status == CrawlStatus.RUNNING,
+                CrawlJob.status == JobStatus.RUNNING,
                 CrawlJob.started_at < stale_threshold,
             )
             .values(
-                status=CrawlStatus.FAILED,
+                status=JobStatus.FAILED,
                 error_message="Crawl timed out",
                 completed_at=datetime.utcnow(),
             )
@@ -153,10 +198,10 @@ async def _resume_crawl(crawl_id: str):
         if not crawl:
             return {"error": "Crawl not found"}
         
-        if crawl.status != CrawlStatus.PAUSED:
+        if crawl.status != JobStatus.PAUSED:
             return {"error": f"Crawl is not paused, status: {crawl.status}"}
         
-        crawl.status = CrawlStatus.RUNNING
+        crawl.status = JobStatus.RUNNING
         await session.commit()
         
         # Continue crawl logic here...
@@ -178,10 +223,10 @@ async def _cancel_crawl(crawl_id: str):
         if not crawl:
             return {"error": "Crawl not found"}
         
-        if crawl.status not in [CrawlStatus.PENDING, CrawlStatus.RUNNING]:
+        if crawl.status not in [JobStatus.PENDING, JobStatus.RUNNING]:
             return {"error": f"Cannot cancel crawl with status: {crawl.status}"}
         
-        crawl.status = CrawlStatus.CANCELLED
+        crawl.status = JobStatus.CANCELLED
         crawl.completed_at = datetime.utcnow()
         await session.commit()
         

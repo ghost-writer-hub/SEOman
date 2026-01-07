@@ -9,9 +9,8 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.orm import declarative_base
-
 from app.config import settings
+from app.models.base import Base
 
 # Convert sync URL to async
 DATABASE_URL = settings.DATABASE_URL.replace(
@@ -34,7 +33,7 @@ AsyncSessionLocal = async_sessionmaker(
     autoflush=False,
 )
 
-Base = declarative_base()
+async_session_maker = AsyncSessionLocal
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
@@ -64,7 +63,27 @@ async def get_db_context() -> AsyncGenerator[AsyncSession, None]:
             await session.close()
 
 
+def get_sync_compatible_session_maker():
+    """Create a fresh session maker for sync/Celery task execution.
+    
+    This creates a new engine and session maker that can be used in
+    Celery workers running with their own event loops.
+    """
+    db_url = settings.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
+    task_engine = create_async_engine(db_url, pool_pre_ping=True, pool_size=5, max_overflow=10)
+    return async_sessionmaker(task_engine, class_=AsyncSession, expire_on_commit=False)
+
+
 async def init_db() -> None:
     """Initialize database tables."""
+    from app.models.tenant import Tenant
+    from app.models.user import User
+    from app.models.site import Site
+    from app.models.crawl import CrawlJob, CrawlPage
+    from app.models.audit import AuditRun, SeoIssue
+    from app.models.keyword import Keyword, KeywordCluster
+    from app.models.plan import SeoPlan, SeoTask
+    from app.models.content import ContentBrief, ContentDraft
+    
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

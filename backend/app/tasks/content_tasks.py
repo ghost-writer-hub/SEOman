@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session_maker
-from app.models.content import ContentBrief, ContentDraft, ContentStatus
+from app.models.content import ContentBrief, ContentDraft, DraftStatus
 from app.models.keyword import Keyword, KeywordCluster
 from app.models.site import Site
 from app.integrations.llm import get_llm_client, generate_content_brief, Message
@@ -71,7 +71,7 @@ async def _generate_brief(task, brief_id: str, site_id: str, tenant_id: str):
             brief.content_outline = result.get("content_outline", [])
             brief.keywords_to_include = result.get("keywords_to_include", [])
             brief.internal_links = result.get("internal_linking_suggestions", [])
-            brief.status = ContentStatus.READY
+            brief.status = DraftStatus.READY
             brief.updated_at = datetime.utcnow()
             
             await session.commit()
@@ -101,7 +101,7 @@ async def _generate_brief(task, brief_id: str, site_id: str, tenant_id: str):
             }
             
         except Exception as e:
-            brief.status = ContentStatus.FAILED
+            brief.status = DraftStatus.FAILED
             brief.error_message = str(e)
             await session.commit()
             
@@ -183,7 +183,7 @@ Write the full article now:"""
             # Update draft
             draft.content = response.content
             draft.word_count = len(response.content.split())
-            draft.status = ContentStatus.DRAFT
+            draft.status = DraftStatus.DRAFT
             draft.updated_at = datetime.utcnow()
             
             await session.commit()
@@ -209,7 +209,7 @@ Write the full article now:"""
             }
             
         except Exception as e:
-            draft.status = ContentStatus.FAILED
+            draft.status = DraftStatus.FAILED
             draft.error_message = str(e)
             await session.commit()
             
@@ -392,7 +392,7 @@ async def _batch_generate_briefs(
                 site_id=UUID(site_id),
                 tenant_id=UUID(tenant_id),
                 target_keyword=keyword.keyword,
-                status=ContentStatus.PENDING,
+                status=DraftStatus.PENDING,
             )
             session.add(brief)
             await session.flush()

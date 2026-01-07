@@ -48,9 +48,10 @@ async def create_audit(
     audit_service = AuditService(db)
     audit = await audit_service.create(site_id, data, current_user.id)
     
-    # TODO: Trigger background task for audit
-    # from app.tasks.audit_tasks import run_audit
-    # run_audit.delay(str(audit.id))
+    await db.commit()
+    
+    from app.tasks.audit_tasks import run_audit
+    run_audit.delay(str(audit.id), str(site_id), str(current_user.tenant_id))
     
     return AuditRunResponse.model_validate(audit)
 

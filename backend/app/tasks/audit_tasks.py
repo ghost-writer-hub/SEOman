@@ -14,7 +14,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session_maker
-from app.models.audit import AuditRun, AuditStatus, SeoIssue, IssueSeverity
+from app.models.audit import AuditRun, SeoIssue, IssueSeverity
+from app.models.crawl import JobStatus
 from app.models.site import Site
 from app.integrations.seoanalyzer import SEOAnalyzerClient
 from app.integrations.llm import get_llm_client, analyze_seo_issues
@@ -48,17 +49,18 @@ async def _run_audit(task, audit_id: str, site_id: str, tenant_id: str):
             return {"error": "Site or audit not found"}
         
         # Update status
-        audit.status = AuditStatus.RUNNING
+        audit.status = JobStatus.RUNNING
         audit.started_at = datetime.utcnow()
         await session.commit()
         
         try:
             # Run SEO analysis
             analyzer = SEOAnalyzerClient()
-            result = await analyzer.analyze(
+            result = await analyzer.analyze_site(
                 url=site.url,
-                follow_links=True,
-                max_pages=100,
+                sitemap=None,
+                analyze_headings=True,
+                analyze_extra_tags=True,
             )
             
             if not result.get("success"):
@@ -104,7 +106,7 @@ async def _run_audit(task, audit_id: str, site_id: str, tenant_id: str):
                 pass  # AI analysis is optional
             
             # Update audit
-            audit.status = AuditStatus.COMPLETED
+            audit.status = JobStatus.COMPLETED
             audit.completed_at = datetime.utcnow()
             audit.score = score
             audit.issues_count = total_issues
@@ -143,7 +145,7 @@ async def _run_audit(task, audit_id: str, site_id: str, tenant_id: str):
             }
             
         except Exception as e:
-            audit.status = AuditStatus.FAILED
+            audit.status = JobStatus.FAILED
             audit.error_message = str(e)
             audit.completed_at = datetime.utcnow()
             await session.commit()
@@ -158,7 +160,6 @@ def _map_severity(severity_str: str) -> IssueSeverity:
         "high": IssueSeverity.HIGH,
         "medium": IssueSeverity.MEDIUM,
         "low": IssueSeverity.LOW,
-        "info": IssueSeverity.INFO,
     }
     return mapping.get(severity_str.lower(), IssueSeverity.LOW)
 
@@ -206,7 +207,7 @@ async def _process_scheduled_audits():
             audit = AuditRun(
                 site_id=site.id,
                 tenant_id=site.tenant_id,
-                status=AuditStatus.PENDING,
+                status=JobStatus.PENDING,
                 audit_type="scheduled",
             )
             session.add(audit)

@@ -1,7 +1,7 @@
 """
 Keyword models for SEO keyword research.
 """
-from sqlalchemy import Column, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Column, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
 
@@ -67,7 +67,7 @@ class KeywordCluster(Base, BaseModel):
         nullable=True,
     )
     mapped_url = Column(Text, nullable=True)
-    is_new_page_recommended = Column(default=False)
+    is_new_page_recommended = Column(Boolean, default=False)
     
     # Relationships
     site = relationship("Site", back_populates="keyword_clusters")
@@ -83,8 +83,7 @@ class KeywordCluster(Base, BaseModel):
         return f"<KeywordCluster {self.label}>"
 
 
-# Association table for keyword-cluster many-to-many
-from sqlalchemy import Table
+from sqlalchemy import Float, Table
 
 keyword_cluster_members = Table(
     "keyword_cluster_members",
@@ -92,3 +91,41 @@ keyword_cluster_members = Table(
     Column("keyword_id", UUID(as_uuid=True), ForeignKey("keywords.id", ondelete="CASCADE"), primary_key=True),
     Column("cluster_id", UUID(as_uuid=True), ForeignKey("keyword_clusters.id", ondelete="CASCADE"), primary_key=True),
 )
+
+
+class KeywordGapStatus(str, __import__("enum").Enum):
+    NEW = "new"
+    TARGETED = "targeted"
+    IGNORED = "ignored"
+    CAPTURED = "captured"
+
+
+class KeywordGap(Base, BaseModel):
+    """Keywords that competitors rank for but we don't."""
+    
+    __tablename__ = "keyword_gaps"
+    
+    site_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("sites.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    keyword = Column(String(500), nullable=False)
+    search_volume = Column(Integer, nullable=True)
+    difficulty = Column(Integer, nullable=True)
+    intent = Column(String(50), nullable=True)
+    competitor_count = Column(Integer, default=0)
+    competitors = Column(JSONB, default=list)
+    priority_score = Column(Float, nullable=True)
+    status = Column(String(20), default="new")
+    
+    # Relationships
+    site = relationship("Site", back_populates="keyword_gaps")
+    
+    __table_args__ = (
+        UniqueConstraint("site_id", "keyword", name="uq_keyword_gap_site_keyword"),
+    )
+    
+    def __repr__(self) -> str:
+        return f"<KeywordGap {self.keyword[:30]}... (vol: {self.search_volume})>"

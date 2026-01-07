@@ -62,6 +62,7 @@ class AuditRun(Base, BaseModel):
     site = relationship("Site", back_populates="audit_runs")
     crawl_job = relationship("CrawlJob", back_populates="audit_runs")
     issues = relationship("SeoIssue", back_populates="audit_run", cascade="all, delete-orphan")
+    audit_checks = relationship("SEOAuditCheck", back_populates="audit_run", cascade="all, delete-orphan")
     seo_plans = relationship("SeoPlan", back_populates="generated_from_audit")
     
     def __repr__(self) -> str:
@@ -107,3 +108,31 @@ class SeoIssue(Base, BaseModel):
     
     def __repr__(self) -> str:
         return f"<SeoIssue {self.title[:30]}... ({self.severity.value})>"
+
+
+class SEOAuditCheck(Base, BaseModel):
+    """Individual check result from the 100-point SEO audit."""
+    
+    __tablename__ = "seo_audit_checks"
+    
+    audit_run_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("audit_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    check_id = Column(Integer, nullable=False)
+    category = Column(String(50), nullable=False)
+    check_name = Column(String(100), nullable=False)
+    passed = Column(Integer, nullable=False)
+    severity = Column(String(20), nullable=True)
+    affected_count = Column(Integer, default=0)
+    affected_urls = Column(JSONB, default=list)
+    details = Column(JSONB, nullable=True)
+    recommendation = Column(Text, nullable=True)
+    
+    # Relationships
+    audit_run = relationship("AuditRun", back_populates="audit_checks")
+    
+    def __repr__(self) -> str:
+        return f"<SEOAuditCheck #{self.check_id} {self.check_name}>"

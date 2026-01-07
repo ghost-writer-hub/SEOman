@@ -11,9 +11,13 @@ from app.api.v1.keywords import router as keywords_router
 from app.api.v1.plans import router as plans_router
 from app.api.v1.content import router as content_router
 from app.api.v1.dashboard import router as dashboard_router
+from app.api.v1.analyze import router as analyze_router
+from app.api.v1.audit_v2 import router as audit_v2_router
 
 api_router = APIRouter()
 
+api_router.include_router(analyze_router)
+api_router.include_router(audit_v2_router)
 api_router.include_router(auth_router)
 api_router.include_router(tenants_router)
 api_router.include_router(sites_router)

@@ -13,8 +13,10 @@ from app.models.base import Base, BaseModel
 class JobStatus(str, PyEnum):
     PENDING = "pending"
     RUNNING = "running"
+    PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class CrawlJob(Base, BaseModel):
@@ -81,6 +83,19 @@ class CrawlPage(Base, BaseModel):
     external_links = Column(JSONB, default=list)
     noindex = Column(Boolean, default=False)
     nofollow = Column(Boolean, default=False)
+    
+    load_time_ms = Column(Integer, nullable=True)
+    issues = Column(JSONB, default=list)
+    raw_html_path = Column(Text, nullable=True)
+    markdown_path = Column(Text, nullable=True)
+    structured_data = Column(JSONB, default=list)
+    open_graph = Column(JSONB, default=dict)
+    hreflang = Column(JSONB, default=list)
+    twitter_cards = Column(JSONB, default=dict)
+    images = Column(JSONB, default=list)
+    scripts_count = Column(Integer, nullable=True)
+    stylesheets_count = Column(Integer, nullable=True)
+    text_content_hash = Column(String(64), nullable=True)
     
     # Relationships
     crawl_job = relationship("CrawlJob", back_populates="pages")

@@ -2,9 +2,14 @@
 Python SEO Analyzer client for quick audits.
 """
 import httpx
+import logging
+import time
 from typing import Any
 
 from app.config import settings
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 
 class SEOAnalyzerClient:
@@ -17,14 +22,19 @@ class SEOAnalyzerClient:
     ):
         self.base_url = base_url or settings.PYTHON_SEOANALYZER_URL
         self.timeout = timeout or settings.PYTHON_SEOANALYZER_TIMEOUT
+        logger.info(f"SEOAnalyzerClient initialized: base_url={self.base_url}, timeout={self.timeout}s")
     
     async def health_check(self) -> bool:
         """Check if the analyzer service is healthy."""
+        logger.debug(f"Health check: {self.base_url}/health")
         try:
             async with httpx.AsyncClient(timeout=5) as client:
                 response = await client.get(f"{self.base_url}/health")
-                return response.status_code == 200
-        except Exception:
+                is_healthy = response.status_code == 200
+                logger.info(f"Health check result: {'OK' if is_healthy else 'FAILED'} (status={response.status_code})")
+                return is_healthy
+        except Exception as e:
+            logger.warning(f"Health check failed: {type(e).__name__}: {e}")
             return False
     
     async def analyze_site(
@@ -54,13 +64,40 @@ class SEOAnalyzerClient:
         if sitemap:
             params["sitemap"] = sitemap
         
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.get(
-                f"{self.base_url}/analyze",
-                params=params,
-            )
-            response.raise_for_status()
-            return response.json()
+        logger.info(f"[ANALYZE] Starting analysis for: {url}")
+        logger.debug(f"[ANALYZE] Request params: {params}")
+        
+        start_time = time.time()
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                logger.debug(f"[ANALYZE] Sending request to {self.base_url}/analyze")
+                response = await client.get(
+                    f"{self.base_url}/analyze",
+                    params=params,
+                )
+                elapsed = time.time() - start_time
+                logger.info(f"[ANALYZE] Response received: status={response.status_code}, elapsed={elapsed:.2f}s")
+                
+                response.raise_for_status()
+                result = response.json()
+                
+                # Log summary of results
+                pages_count = len(result.get("pages", []))
+                logger.info(f"[ANALYZE] Analysis complete: {pages_count} pages analyzed in {elapsed:.2f}s")
+                
+                return result
+        except httpx.TimeoutException as e:
+            elapsed = time.time() - start_time
+            logger.error(f"[ANALYZE] Timeout after {elapsed:.2f}s: {e}")
+            raise
+        except httpx.HTTPStatusError as e:
+            elapsed = time.time() - start_time
+            logger.error(f"[ANALYZE] HTTP error after {elapsed:.2f}s: {e.response.status_code} - {e.response.text[:200]}")
+            raise
+        except Exception as e:
+            elapsed = time.time() - start_time
+            logger.error(f"[ANALYZE] Error after {elapsed:.2f}s: {type(e).__name__}: {e}")
+            raise
     
     def parse_issues(self, analysis_result: dict) -> list[dict]:
         """

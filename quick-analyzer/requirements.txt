@@ -1,0 +1,2 @@
+flask>=2.0.0
+pyseoanalyzer>=2025.4.0

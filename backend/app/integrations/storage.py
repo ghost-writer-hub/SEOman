@@ -1,32 +1,28 @@
 """
 Storage Integration Client
 
-Provides S3-compatible storage operations using MinIO.
-Used for storing crawl data, reports, exports, and other files.
+Supports multiple storage backends:
+- local: Local filesystem (for development without S3)
+- minio: MinIO S3-compatible storage
+- b2: Backblaze B2 cloud storage
 """
 
 import io
 import json
+import os
+import shutil
+import logging
+import hashlib
+from abc import ABC, abstractmethod
 from typing import Optional, List, Dict, Any, BinaryIO, Union
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 from pathlib import Path
 import mimetypes
 
-from minio import Minio
-from minio.error import S3Error
-from minio.commonconfig import CopySource
-
 from app.config import settings
 
-
-@dataclass
-class StorageConfig:
-    endpoint: str
-    access_key: str
-    secret_key: str
-    bucket: str
-    secure: bool = False
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -39,194 +35,285 @@ class StorageObject:
     metadata: Optional[Dict[str, str]] = None
 
 
-class StorageClient:
-    """S3-compatible storage client using MinIO."""
+class BaseStorageClient(ABC):
+    """Abstract base class for storage clients."""
     
-    def __init__(self, config: Optional[StorageConfig] = None):
-        if config is None:
-            config = StorageConfig(
-                endpoint=settings.MINIO_ENDPOINT,
-                access_key=settings.MINIO_ACCESS_KEY,
-                secret_key=settings.MINIO_SECRET_KEY,
-                bucket=settings.MINIO_BUCKET,
-                secure=settings.MINIO_USE_SSL,
-            )
-        self.config = config
-        self._client = Minio(
-            config.endpoint,
-            access_key=config.access_key,
-            secret_key=config.secret_key,
-            secure=config.secure,
-        )
-        self._ensure_bucket()
+    @abstractmethod
+    def upload_bytes(self, key: str, data: bytes, content_type: Optional[str] = None, metadata: Optional[Dict[str, str]] = None) -> str:
+        pass
     
-    def _ensure_bucket(self):
-        """Ensure the bucket exists, create if not."""
-        try:
-            if not self._client.bucket_exists(self.config.bucket):
-                self._client.make_bucket(self.config.bucket)
-        except S3Error as e:
-            # Bucket might already exist or we don't have permissions
-            if e.code != "BucketAlreadyOwnedByYou":
-                raise
+    @abstractmethod
+    def download_bytes(self, key: str) -> bytes:
+        pass
+    
+    @abstractmethod
+    def delete(self, key: str) -> bool:
+        pass
+    
+    @abstractmethod
+    def exists(self, key: str) -> bool:
+        pass
+    
+    @abstractmethod
+    def list_objects(self, prefix: str = "", recursive: bool = True, max_keys: Optional[int] = None) -> List[StorageObject]:
+        pass
+    
+    @abstractmethod
+    def get_presigned_url(self, key: str, expires: timedelta = timedelta(hours=1), method: str = "GET") -> str:
+        pass
     
     def _get_content_type(self, key: str) -> str:
-        """Guess content type from file extension."""
         content_type, _ = mimetypes.guess_type(key)
         return content_type or "application/octet-stream"
     
-    def upload_file(
-        self,
-        key: str,
-        file_path: Union[str, Path],
-        content_type: Optional[str] = None,
-        metadata: Optional[Dict[str, str]] = None,
-    ) -> str:
-        """Upload a file from disk."""
-        file_path = Path(file_path)
+    def upload_json(self, key: str, data: Any, metadata: Optional[Dict[str, str]] = None) -> str:
+        json_bytes = json.dumps(data, indent=2, default=str).encode("utf-8")
+        return self.upload_bytes(key, json_bytes, content_type="application/json", metadata=metadata)
+    
+    def upload_markdown(self, key: str, content: str, metadata: Optional[Dict[str, str]] = None) -> str:
+        md_bytes = content.encode("utf-8")
+        return self.upload_bytes(key, md_bytes, content_type="text/markdown", metadata=metadata)
+    
+    def download_json(self, key: str) -> Any:
+        data = self.download_bytes(key)
+        return json.loads(data.decode("utf-8"))
+
+
+class LocalStorageClient(BaseStorageClient):
+    """Local filesystem storage for development."""
+    
+    def __init__(self, base_path: str = None, base_url: str = None):
+        self.base_path = Path(base_path or settings.LOCAL_STORAGE_PATH)
+        self.base_url = base_url or settings.LOCAL_STORAGE_BASE_URL
+        self.base_path.mkdir(parents=True, exist_ok=True)
+        logger.info(f"LocalStorageClient initialized at {self.base_path}")
+    
+    def _get_full_path(self, key: str) -> Path:
+        return self.base_path / key
+    
+    def upload_bytes(self, key: str, data: bytes, content_type: Optional[str] = None, metadata: Optional[Dict[str, str]] = None) -> str:
+        file_path = self._get_full_path(key)
+        file_path.parent.mkdir(parents=True, exist_ok=True)
         
-        if content_type is None:
-            content_type = self._get_content_type(str(file_path))
+        file_path.write_bytes(data)
         
-        self._client.fput_object(
-            self.config.bucket,
-            key,
-            str(file_path),
-            content_type=content_type,
-            metadata=metadata,
-        )
+        if metadata:
+            meta_path = file_path.with_suffix(file_path.suffix + ".meta")
+            meta_path.write_text(json.dumps(metadata))
         
+        logger.info(f"Uploaded {len(data)} bytes to {key}")
         return key
     
-    def upload_bytes(
-        self,
-        key: str,
-        data: bytes,
-        content_type: Optional[str] = None,
-        metadata: Optional[Dict[str, str]] = None,
-    ) -> str:
-        """Upload bytes directly."""
+    def upload_file(self, key: str, file_path: Union[str, Path], content_type: Optional[str] = None, metadata: Optional[Dict[str, str]] = None) -> str:
+        source_path = Path(file_path)
+        dest_path = self._get_full_path(key)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        shutil.copy2(source_path, dest_path)
+        
+        if metadata:
+            meta_path = dest_path.with_suffix(dest_path.suffix + ".meta")
+            meta_path.write_text(json.dumps(metadata))
+        
+        logger.info(f"Uploaded file {file_path} to {key}")
+        return key
+    
+    def download_bytes(self, key: str) -> bytes:
+        file_path = self._get_full_path(key)
+        if not file_path.exists():
+            raise FileNotFoundError(f"File not found: {key}")
+        return file_path.read_bytes()
+    
+    def download_file(self, key: str, file_path: Union[str, Path]) -> Path:
+        dest_path = Path(file_path)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        source_path = self._get_full_path(key)
+        shutil.copy2(source_path, dest_path)
+        
+        return dest_path
+    
+    def delete(self, key: str) -> bool:
+        file_path = self._get_full_path(key)
+        try:
+            file_path.unlink(missing_ok=True)
+            meta_path = file_path.with_suffix(file_path.suffix + ".meta")
+            meta_path.unlink(missing_ok=True)
+            return True
+        except Exception:
+            return False
+    
+    def delete_many(self, keys: List[str]) -> int:
+        deleted = 0
+        for key in keys:
+            if self.delete(key):
+                deleted += 1
+        return deleted
+    
+    def delete_prefix(self, prefix: str) -> int:
+        objects = self.list_objects(prefix=prefix)
+        return self.delete_many([obj.key for obj in objects])
+    
+    def exists(self, key: str) -> bool:
+        return self._get_full_path(key).exists()
+    
+    def get_info(self, key: str) -> Optional[StorageObject]:
+        file_path = self._get_full_path(key)
+        if not file_path.exists():
+            return None
+        
+        stat = file_path.stat()
+        content = file_path.read_bytes()
+        etag = hashlib.md5(content).hexdigest()
+        
+        return StorageObject(
+            key=key,
+            size=stat.st_size,
+            last_modified=datetime.fromtimestamp(stat.st_mtime),
+            etag=etag,
+            content_type=self._get_content_type(key),
+        )
+    
+    def list_objects(self, prefix: str = "", recursive: bool = True, max_keys: Optional[int] = None) -> List[StorageObject]:
+        objects = []
+        search_path = self.base_path / prefix if prefix else self.base_path
+        
+        if not search_path.exists():
+            return objects
+        
+        pattern = "**/*" if recursive else "*"
+        
+        for file_path in search_path.glob(pattern):
+            if file_path.is_file() and not file_path.suffix == ".meta":
+                key = str(file_path.relative_to(self.base_path))
+                stat = file_path.stat()
+                
+                objects.append(StorageObject(
+                    key=key,
+                    size=stat.st_size,
+                    last_modified=datetime.fromtimestamp(stat.st_mtime),
+                    etag=hashlib.md5(file_path.read_bytes()).hexdigest(),
+                    content_type=self._get_content_type(key),
+                ))
+                
+                if max_keys and len(objects) >= max_keys:
+                    break
+        
+        return objects
+    
+    def copy(self, source_key: str, dest_key: str, source_bucket: Optional[str] = None) -> str:
+        source_path = self._get_full_path(source_key)
+        dest_path = self._get_full_path(dest_key)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        shutil.copy2(source_path, dest_path)
+        return dest_key
+    
+    def move(self, source_key: str, dest_key: str) -> str:
+        self.copy(source_key, dest_key)
+        self.delete(source_key)
+        return dest_key
+    
+    def get_presigned_url(self, key: str, expires: timedelta = timedelta(hours=1), method: str = "GET") -> str:
+        return f"{self.base_url}/{key}"
+    
+    def get_public_url(self, key: str) -> str:
+        return f"{self.base_url}/{key}"
+
+
+class S3StorageClient(BaseStorageClient):
+    """S3-compatible storage client using MinIO."""
+    
+    def __init__(self, endpoint: str, access_key: str, secret_key: str, bucket: str, secure: bool = False, provider: str = "minio"):
+        from minio import Minio
+        
+        self.endpoint = endpoint
+        self.bucket = bucket
+        self.secure = secure
+        self.provider = provider
+        
+        self._client = Minio(
+            endpoint,
+            access_key=access_key,
+            secret_key=secret_key,
+            secure=secure,
+        )
+        self._ensure_bucket()
+        logger.info(f"S3StorageClient initialized for {provider} at {endpoint}/{bucket}")
+    
+    def _ensure_bucket(self):
+        from minio.error import S3Error
+        try:
+            if not self._client.bucket_exists(self.bucket):
+                self._client.make_bucket(self.bucket)
+                logger.info(f"Created bucket: {self.bucket}")
+        except S3Error as e:
+            if e.code != "BucketAlreadyOwnedByYou":
+                logger.error(f"Failed to ensure bucket: {e}")
+                raise
+    
+    def upload_bytes(self, key: str, data: bytes, content_type: Optional[str] = None, metadata: Optional[Dict[str, str]] = None) -> str:
         if content_type is None:
             content_type = self._get_content_type(key)
         
         stream = io.BytesIO(data)
-        
         self._client.put_object(
-            self.config.bucket,
-            key,
-            stream,
-            length=len(data),
-            content_type=content_type,
-            metadata=metadata,
+            self.bucket, key, stream, length=len(data),
+            content_type=content_type, metadata=metadata,
         )
         
+        logger.info(f"Uploaded {len(data)} bytes to s3://{self.bucket}/{key}")
         return key
     
-    def upload_json(
-        self,
-        key: str,
-        data: Any,
-        metadata: Optional[Dict[str, str]] = None,
-    ) -> str:
-        """Upload JSON data."""
-        json_bytes = json.dumps(data, indent=2, default=str).encode("utf-8")
-        return self.upload_bytes(
-            key,
-            json_bytes,
-            content_type="application/json",
-            metadata=metadata,
-        )
-    
-    def upload_stream(
-        self,
-        key: str,
-        stream: BinaryIO,
-        length: int,
-        content_type: Optional[str] = None,
-        metadata: Optional[Dict[str, str]] = None,
-    ) -> str:
-        """Upload from a stream."""
-        if content_type is None:
-            content_type = self._get_content_type(key)
-        
-        self._client.put_object(
-            self.config.bucket,
-            key,
-            stream,
-            length=length,
-            content_type=content_type,
-            metadata=metadata,
-        )
-        
-        return key
-    
-    def download_file(
-        self,
-        key: str,
-        file_path: Union[str, Path],
-    ) -> Path:
-        """Download a file to disk."""
+    def upload_file(self, key: str, file_path: Union[str, Path], content_type: Optional[str] = None, metadata: Optional[Dict[str, str]] = None) -> str:
         file_path = Path(file_path)
-        file_path.parent.mkdir(parents=True, exist_ok=True)
+        if content_type is None:
+            content_type = self._get_content_type(str(file_path))
         
-        self._client.fget_object(
-            self.config.bucket,
-            key,
-            str(file_path),
+        self._client.fput_object(
+            self.bucket, key, str(file_path),
+            content_type=content_type, metadata=metadata,
         )
         
-        return file_path
+        logger.info(f"Uploaded file {file_path} to s3://{self.bucket}/{key}")
+        return key
     
     def download_bytes(self, key: str) -> bytes:
-        """Download file as bytes."""
-        response = self._client.get_object(self.config.bucket, key)
+        response = self._client.get_object(self.bucket, key)
         try:
             return response.read()
         finally:
             response.close()
             response.release_conn()
     
-    def download_json(self, key: str) -> Any:
-        """Download and parse JSON file."""
-        data = self.download_bytes(key)
-        return json.loads(data.decode("utf-8"))
-    
-    def download_stream(self, key: str) -> BinaryIO:
-        """Get a stream to download file."""
-        response = self._client.get_object(self.config.bucket, key)
-        return response
+    def download_file(self, key: str, file_path: Union[str, Path]) -> Path:
+        file_path = Path(file_path)
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        self._client.fget_object(self.bucket, key, str(file_path))
+        return file_path
     
     def delete(self, key: str) -> bool:
-        """Delete an object."""
+        from minio.error import S3Error
         try:
-            self._client.remove_object(self.config.bucket, key)
+            self._client.remove_object(self.bucket, key)
             return True
         except S3Error:
             return False
     
     def delete_many(self, keys: List[str]) -> int:
-        """Delete multiple objects. Returns count of deleted."""
         from minio.deleteobjects import DeleteObject
-        
         delete_objects = [DeleteObject(key) for key in keys]
-        errors = list(self._client.remove_objects(self.config.bucket, delete_objects))
-        
+        errors = list(self._client.remove_objects(self.bucket, delete_objects))
         return len(keys) - len(errors)
     
     def delete_prefix(self, prefix: str) -> int:
-        """Delete all objects with given prefix."""
         objects = self.list_objects(prefix=prefix)
-        keys = [obj.key for obj in objects]
-        
-        if not keys:
-            return 0
-        
-        return self.delete_many(keys)
+        return self.delete_many([obj.key for obj in objects])
     
     def exists(self, key: str) -> bool:
-        """Check if an object exists."""
+        from minio.error import S3Error
         try:
-            self._client.stat_object(self.config.bucket, key)
+            self._client.stat_object(self.bucket, key)
             return True
         except S3Error as e:
             if e.code == "NoSuchKey":
@@ -234,9 +321,9 @@ class StorageClient:
             raise
     
     def get_info(self, key: str) -> Optional[StorageObject]:
-        """Get object metadata."""
+        from minio.error import S3Error
         try:
-            stat = self._client.stat_object(self.config.bucket, key)
+            stat = self._client.stat_object(self.bucket, key)
             return StorageObject(
                 key=key,
                 size=stat.size,
@@ -250,20 +337,9 @@ class StorageClient:
                 return None
             raise
     
-    def list_objects(
-        self,
-        prefix: str = "",
-        recursive: bool = True,
-        max_keys: Optional[int] = None,
-    ) -> List[StorageObject]:
-        """List objects with optional prefix filter."""
+    def list_objects(self, prefix: str = "", recursive: bool = True, max_keys: Optional[int] = None) -> List[StorageObject]:
         objects = []
-        
-        for obj in self._client.list_objects(
-            self.config.bucket,
-            prefix=prefix,
-            recursive=recursive,
-        ):
+        for obj in self._client.list_objects(self.bucket, prefix=prefix, recursive=recursive):
             objects.append(StorageObject(
                 key=obj.object_name,
                 size=obj.size,
@@ -271,68 +347,33 @@ class StorageClient:
                 etag=obj.etag,
                 content_type=obj.content_type,
             ))
-            
             if max_keys and len(objects) >= max_keys:
                 break
-        
         return objects
     
-    def copy(
-        self,
-        source_key: str,
-        dest_key: str,
-        source_bucket: Optional[str] = None,
-    ) -> str:
-        """Copy an object."""
-        source_bucket = source_bucket or self.config.bucket
-        
-        self._client.copy_object(
-            self.config.bucket,
-            dest_key,
-            CopySource(source_bucket, source_key),
-        )
-        
+    def copy(self, source_key: str, dest_key: str, source_bucket: Optional[str] = None) -> str:
+        from minio.commonconfig import CopySource
+        source_bucket = source_bucket or self.bucket
+        self._client.copy_object(self.bucket, dest_key, CopySource(source_bucket, source_key))
         return dest_key
     
-    def move(
-        self,
-        source_key: str,
-        dest_key: str,
-    ) -> str:
-        """Move an object (copy + delete)."""
+    def move(self, source_key: str, dest_key: str) -> str:
         self.copy(source_key, dest_key)
         self.delete(source_key)
         return dest_key
     
-    def get_presigned_url(
-        self,
-        key: str,
-        expires: timedelta = timedelta(hours=1),
-        method: str = "GET",
-    ) -> str:
-        """Generate a presigned URL for temporary access."""
+    def get_presigned_url(self, key: str, expires: timedelta = timedelta(hours=1), method: str = "GET") -> str:
         if method == "GET":
-            return self._client.presigned_get_object(
-                self.config.bucket,
-                key,
-                expires=expires,
-            )
+            return self._client.presigned_get_object(self.bucket, key, expires=expires)
         elif method == "PUT":
-            return self._client.presigned_put_object(
-                self.config.bucket,
-                key,
-                expires=expires,
-            )
+            return self._client.presigned_put_object(self.bucket, key, expires=expires)
         else:
             raise ValueError(f"Unsupported method: {method}")
     
     def get_public_url(self, key: str) -> str:
-        """Get the public URL (requires bucket to be public)."""
-        protocol = "https" if self.config.secure else "http"
-        return f"{protocol}://{self.config.endpoint}/{self.config.bucket}/{key}"
+        protocol = "https" if self.secure else "http"
+        return f"{protocol}://{self.endpoint}/{self.bucket}/{key}"
 
-
-# Storage path helpers for SEOman
 
 class SEOmanStoragePaths:
     """Helper class for consistent storage paths."""
@@ -376,15 +417,68 @@ class SEOmanStoragePaths:
     @staticmethod
     def site_prefix(tenant_id: str, site_id: str) -> str:
         return f"tenants/{tenant_id}/sites/{site_id}/"
+    
+    @staticmethod
+    def report_base(tenant_id: str, site_id: str, report_id: str) -> str:
+        return f"tenants/{tenant_id}/sites/{site_id}/reports/{report_id}/"
+    
+    @staticmethod
+    def audit_report_md(tenant_id: str, site_id: str, report_id: str) -> str:
+        return f"tenants/{tenant_id}/sites/{site_id}/reports/{report_id}/audit-report.md"
+    
+    @staticmethod
+    def seo_plan_md(tenant_id: str, site_id: str, report_id: str) -> str:
+        return f"tenants/{tenant_id}/sites/{site_id}/reports/{report_id}/seo-plan.md"
+    
+    @staticmethod
+    def page_fixes_md(tenant_id: str, site_id: str, report_id: str) -> str:
+        return f"tenants/{tenant_id}/sites/{site_id}/reports/{report_id}/page-fixes.md"
+    
+    @staticmethod
+    def article_brief_md(tenant_id: str, site_id: str, report_id: str, brief_num: int, keyword_slug: str) -> str:
+        return f"tenants/{tenant_id}/sites/{site_id}/reports/{report_id}/briefs/article-{brief_num:02d}-{keyword_slug}.md"
+    
+    @staticmethod
+    def report_metadata(tenant_id: str, site_id: str, report_id: str) -> str:
+        return f"tenants/{tenant_id}/sites/{site_id}/reports/{report_id}/metadata.json"
 
 
-# Default client instance
-_default_client: Optional[StorageClient] = None
+_default_client: Optional[BaseStorageClient] = None
 
 
-def get_storage_client() -> StorageClient:
-    """Get or create the default storage client."""
+def get_storage_client() -> BaseStorageClient:
+    """Get or create the default storage client based on settings."""
     global _default_client
+    
     if _default_client is None:
-        _default_client = StorageClient()
+        provider = getattr(settings, 'STORAGE_PROVIDER', 'local')
+        logger.info(f"Initializing storage client with provider: {provider}")
+        
+        if provider == "local":
+            _default_client = LocalStorageClient()
+        elif provider == "b2":
+            _default_client = S3StorageClient(
+                endpoint=settings.B2_ENDPOINT,
+                access_key=settings.B2_KEY_ID,
+                secret_key=settings.B2_APPLICATION_KEY,
+                bucket=settings.B2_BUCKET,
+                secure=True,
+                provider="b2",
+            )
+        else:
+            _default_client = S3StorageClient(
+                endpoint=settings.MINIO_ENDPOINT,
+                access_key=settings.MINIO_ACCESS_KEY,
+                secret_key=settings.MINIO_SECRET_KEY,
+                bucket=settings.MINIO_BUCKET,
+                secure=settings.MINIO_USE_SSL,
+                provider="minio",
+            )
+    
     return _default_client
+
+
+def reset_storage_client():
+    """Reset the default client (useful for testing or config changes)."""
+    global _default_client
+    _default_client = None

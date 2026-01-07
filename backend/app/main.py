@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.router import api_router
 from app.config import settings
 from app.database import init_db
+from app.worker import celery_app
 
 
 @asynccontextmanager
@@ -16,8 +17,11 @@ async def lifespan(app: FastAPI):
     """Application lifespan handler."""
     # Startup
     await init_db()
+    # Reset Celery connection pool to ensure fresh connections
+    celery_app.close()
     yield
     # Shutdown
+    celery_app.close()
 
 
 app = FastAPI(

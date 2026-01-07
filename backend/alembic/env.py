@@ -23,7 +23,7 @@ from app.models.user import User
 from app.models.site import Site
 from app.models.crawl import CrawlJob, CrawlPage
 from app.models.audit import AuditRun, SeoIssue
-from app.models.keyword import Keyword, KeywordCluster, keyword_cluster_association
+from app.models.keyword import Keyword, KeywordCluster, keyword_cluster_members
 from app.models.plan import SeoPlan, SeoTask
 from app.models.content import ContentBrief, ContentDraft
 
@@ -31,7 +31,11 @@ from app.models.content import ContentBrief, ContentDraft
 config = context.config
 
 # Override sqlalchemy.url with environment variable
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+# Convert to async driver URL for asyncpg
+db_url = settings.DATABASE_URL
+if db_url.startswith("postgresql://"):
+    db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+config.set_main_option("sqlalchemy.url", db_url)
 
 # Interpret the config file for Python logging.
 if config.config_file_name is not None:
