@@ -1,0 +1,902 @@
+{
+    "product": {
+      "name": "multi_tenant_seo_agent",
+      "version": "0.1.0",
+      "description": "Multi-tenant SEO platform that crawls websites, runs SEO audits, does keyword research via DataForSEO, and generates SEO plans and AI content using an agentic LLM workflow."
+    },
+    "actors": [
+      {
+        "id": "super_admin",
+        "permissions": [
+          "tenant:create",
+          "tenant:update",
+          "tenant:delete",
+          "tenant:list",
+          "settings:llm_config:update",
+          "settings:dataforseo_config:update"
+        ]
+      },
+      {
+        "id": "tenant_admin",
+        "permissions": [
+          "site:create",
+          "site:update",
+          "site:delete",
+          "user:invite",
+          "user:update_role",
+          "user:deactivate",
+          "billing:view",
+          "project_settings:update",
+          "audit:view",
+          "keywords:view",
+          "plan:view",
+          "content:view"
+        ]
+      },
+      {
+        "id": "seo_manager",
+        "permissions": [
+          "audit:run",
+          "audit:view",
+          "keywords:run",
+          "keywords:view",
+          "plan:generate",
+          "plan:update_status",
+          "content:generate_brief",
+          "content:generate_draft",
+          "content:edit",
+          "content:export"
+        ]
+      },
+      {
+        "id": "read_only",
+        "permissions": [
+          "dashboard:view",
+          "audit:view",
+          "keywords:view",
+          "plan:view",
+          "content:view"
+        ]
+      }
+    ],
+    "features": [
+      {
+        "id": "multi_tenancy",
+        "description": "Logical separation of data per tenant with role-based access."
+      },
+      {
+        "id": "site_crawling",
+        "description": "Trigger Deepcrawl jobs for a given site and store structured crawl results."
+      },
+      {
+        "id": "technical_seo_audit",
+        "description": "Analyze crawl data and produce structured SEO issues and summary."
+      },
+      {
+        "id": "keyword_research",
+        "description": "Use DataForSEO APIs to discover, expand and score keywords and cluster them."
+      },
+      {
+        "id": "seo_plan",
+        "description": "Generate a prioritized SEO roadmap combining technical issues and keyword data."
+      },
+      {
+        "id": "content_generation",
+        "description": "Generate content briefs and drafts for target pages based on keyword clusters."
+      },
+      {
+        "id": "reporting_dashboard",
+        "description": "Show audit scores, open issues, keyword opportunities and content stats."
+      },
+      {
+        "id": "automation_scheduling",
+        "description": "Schedule recurring crawls and keyword refreshes with notifications and alerts."
+      }
+    ],
+    "db_entities": {
+      "Tenant": {
+        "table": "tenants",
+        "primary_key": "id",
+        "fields": {
+          "id": "uuid",
+          "name": "string",
+          "slug": "string",
+          "created_at": "timestamp",
+          "updated_at": "timestamp",
+          "status": "enum[active,suspended]",
+          "plan": "string"
+        }
+      },
+      "User": {
+        "table": "users",
+        "primary_key": "id",
+        "fields": {
+          "id": "uuid",
+          "tenant_id": "uuid (fk tenants.id)",
+          "email": "string",
+          "password_hash": "string",
+          "name": "string",
+          "role": "enum[super_admin,tenant_admin,seo_manager,read_only]",
+          "created_at": "timestamp",
+          "updated_at": "timestamp",
+          "status": "enum[active,inactive]"
+        }
+      },
+      "Site": {
+        "table": "sites",
+        "primary_key": "id",
+        "fields": {
+          "id": "uuid",
+          "tenant_id": "uuid (fk tenants.id)",
+          "name": "string",
+          "primary_domain": "string",
+          "additional_domains": "jsonb",
+          "default_language": "string",
+          "target_countries": "jsonb",
+          "cms_type": "string",
+          "brand_tone": "jsonb",
+          "enabled_features": "jsonb",
+          "created_at": "timestamp",
+          "updated_at": "timestamp"
+        }
+      },
+      "CrawlJob": {
+        "table": "crawl_jobs",
+        "primary_key": "id",
+        "fields": {
+          "id": "uuid",
+          "site_id": "uuid (fk sites.id)",
+          "deepcrawl_job_id": "string",
+          "status": "enum[pending,running,completed,failed]",
+          "config": "jsonb",
+          "started_at": "timestamp",
+          "completed_at": "timestamp",
+          "error_message": "string|null"
+        }
+      },
+      "CrawlPage": {
+        "table": "crawl_pages",
+        "primary_key": "id",
+        "fields": {
+          "id": "uuid",
+          "crawl_job_id": "uuid (fk crawl_jobs.id)",
+          "site_id": "uuid (fk sites.id)",
+          "url": "string",
+          "status_code": "int",
+          "content_type": "string",
+          "canonical_url": "string|null",
+          "meta_robots": "string|null",
+          "hreflang": "jsonb|null",
+          "title": "string|null",
+          "meta_description": "string|null",
+          "h1": "string|null",
+          "h2": "jsonb|null",
+          "h3": "jsonb|null",
+          "word_count": "int|null",
+          "main_content_markdown": "text|null",
+          "internal_links": "jsonb",
+          "external_links": "jsonb",
+          "noindex": "boolean",
+          "nofollow": "boolean",
+          "created_at": "timestamp"
+        }
+      },
+      "AuditRun": {
+        "table": "audit_runs",
+        "primary_key": "id",
+        "fields": {
+          "id": "uuid",
+          "site_id": "uuid (fk sites.id)",
+          "crawl_job_id": "uuid (fk crawl_jobs.id)",
+          "created_by_user_id": "uuid (fk users.id|null)",
+          "status": "enum[pending,running,completed,failed]",
+          "score": "int|null",
+          "summary": "text|null",
+          "findings_overview": "jsonb|null",
+          "created_at": "timestamp",
+          "completed_at": "timestamp|null",
+          "error_message": "string|null"
+        }
+      },
+      "SeoIssue": {
+        "table": "seo_issues",
+        "primary_key": "id",
+        "fields": {
+          "id": "uuid",
+          "audit_run_id": "uuid (fk audit_runs.id)",
+          "site_id": "uuid (fk sites.id)",
+          "type": "string",
+          "category": "string",
+          "severity": "enum[low,medium,high]",
+          "description": "text",
+          "suggested_fix": "text",
+          "affected_urls": "jsonb",
+          "status": "enum[open,resolved,ignored]",
+          "created_at": "timestamp",
+          "resolved_at": "timestamp|null"
+        }
+      },
+      "Keyword": {
+        "table": "keywords",
+        "primary_key": "id",
+        "fields": {
+          "id": "uuid",
+          "site_id": "uuid (fk sites.id)",
+          "text": "string",
+          "language": "string",
+          "country": "string",
+          "search_volume": "int|null",
+          "cpc": "numeric|null",
+          "competition": "numeric|null",
+          "difficulty": "numeric|null",
+          "intent": "string|null",
+          "dataforseo_raw": "jsonb|null",
+          "created_at": "timestamp"
+        }
+      },
+      "KeywordCluster": {
+        "table": "keyword_clusters",
+        "primary_key": "id",
+        "fields": {
+          "id": "uuid",
+          "site_id": "uuid (fk sites.id)",
+          "label": "string",
+          "description": "text|null",
+          "language": "string",
+          "country": "string",
+          "keyword_ids": "jsonb",
+          "existing_url_id": "uuid|null (fk crawl_pages.id)",
+          "recommended_page_id": "uuid|null (fk page_recommendations.id)",
+          "created_at": "timestamp"
+        }
+      },
+      "PageRecommendation": {
+        "table": "page_recommendations",
+        "primary_key": "id",
+        "fields": {
+          "id": "uuid",
+          "site_id": "uuid (fk sites.id)",
+          "slug": "string",
+          "page_type": "enum[landing,blog,category,product,other]",
+          "reason": "text",
+          "keyword_cluster_id": "uuid|null (fk keyword_clusters.id)",
+          "status": "enum[suggested,approved,implemented]",
+          "created_at": "timestamp",
+          "implemented_url": "string|null"
+        }
+      },
+      "SeoPlan": {
+        "table": "seo_plans",
+        "primary_key": "id",
+        "fields": {
+          "id": "uuid",
+          "site_id": "uuid (fk sites.id)",
+          "name": "string",
+          "timeframe_summary": "jsonb",
+          "generated_by_audit_run_id": "uuid|null (fk audit_runs.id)",
+          "generated_at": "timestamp",
+          "created_by_user_id": "uuid|null (fk users.id)"
+        }
+      },
+      "SeoTask": {
+        "table": "seo_tasks",
+        "primary_key": "id",
+        "fields": {
+          "id": "uuid",
+          "seo_plan_id": "uuid (fk seo_plans.id)",
+          "site_id": "uuid (fk sites.id)",
+          "title": "string",
+          "description": "text",
+          "category": "enum[technical,content,on_page,authority,other]",
+          "impact": "enum[low,medium,high]",
+          "effort": "enum[low,medium,high]",
+          "assignee_type": "enum[developer,content_writer,seo,other]",
+          "status": "enum[todo,in_progress,done]",
+          "related_issue_ids": "jsonb",
+          "related_keyword_cluster_ids": "jsonb",
+          "created_at": "timestamp",
+          "updated_at": "timestamp"
+        }
+      },
+      "ContentBrief": {
+        "table": "content_briefs",
+        "primary_key": "id",
+        "fields": {
+          "id": "uuid",
+          "site_id": "uuid (fk sites.id)",
+          "keyword_cluster_id": "uuid (fk keyword_clusters.id)",
+          "target_keyword": "string",
+          "secondary_keywords": "jsonb",
+          "search_intent": "string",
+          "page_recommendation_id": "uuid|null (fk page_recommendations.id)",
+          "suggested_slug": "string|null",
+          "page_type": "enum[landing,blog,category,product,other]",
+          "outline": "jsonb",
+          "internal_link_suggestions": "jsonb",
+          "tone_guidelines": "jsonb",
+          "language": "string",
+          "created_at": "timestamp",
+          "created_by_user_id": "uuid|null (fk users.id)"
+        }
+      },
+      "ContentDraft": {
+        "table": "content_drafts",
+        "primary_key": "id",
+        "fields": {
+          "id": "uuid",
+          "site_id": "uuid (fk sites.id)",
+          "content_brief_id": "uuid (fk content_briefs.id)",
+          "draft_version": "int",
+          "title_tag": "string",
+          "meta_description": "string",
+          "h1": "string",
+          "body_html": "text",
+          "body_markdown": "text",
+          "faq": "jsonb|null",
+          "status": "enum[draft,approved,rejected]",
+          "created_at": "timestamp",
+          "updated_at": "timestamp",
+          "created_by_user_id": "uuid|null",
+          "updated_by_user_id": "uuid|null"
+        }
+      },
+      "Notification": {
+        "table": "notifications",
+        "primary_key": "id",
+        "fields": {
+          "id": "uuid",
+          "tenant_id": "uuid (fk tenants.id)",
+          "user_id": "uuid (fk users.id|null)",
+          "type": "string",
+          "message": "text",
+          "severity": "enum[info,warning,error]",
+          "metadata": "jsonb",
+          "read_at": "timestamp|null",
+          "created_at": "timestamp"
+        }
+      },
+      "ScheduledJob": {
+        "table": "scheduled_jobs",
+        "primary_key": "id",
+        "fields": {
+          "id": "uuid",
+          "site_id": "uuid (fk sites.id)",
+          "job_type": "enum[crawl,keyword_refresh]",
+          "cron_expression": "string",
+          "config": "jsonb",
+          "status": "enum[active,paused]",
+          "last_run_at": "timestamp|null",
+          "next_run_at": "timestamp|null",
+          "created_at": "timestamp"
+        }
+      },
+      "IntegrationConfig": {
+        "table": "integration_configs",
+        "primary_key": "id",
+        "fields": {
+          "id": "uuid",
+          "tenant_id": "uuid|null (fk tenants.id)",
+          "type": "enum[deepcrawl,dataforseo,llm]",
+          "config": "jsonb",
+          "scope": "enum[global,tenant]",
+          "created_at": "timestamp",
+          "updated_at": "timestamp"
+        }
+      }
+    },
+    "backend_api": {
+      "base_path": "/api/v1",
+      "auth": {
+        "type": "jwt",
+        "endpoints": [
+          {
+            "method": "POST",
+            "path": "/auth/login",
+            "input": { "email": "string", "password": "string" },
+            "output": { "token": "string", "user": "User" }
+          },
+          {
+            "method": "POST",
+            "path": "/auth/logout",
+            "input": {},
+            "output": {}
+          }
+        ]
+      },
+      "rest_endpoints": [
+        {
+          "resource": "tenants",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/tenants",
+              "auth_role": "super_admin",
+              "output": "Tenant[]"
+            },
+            {
+              "method": "POST",
+              "path": "/tenants",
+              "auth_role": "super_admin",
+              "input": { "name": "string", "slug": "string", "plan": "string" },
+              "output": "Tenant"
+            }
+          ]
+        },
+        {
+          "resource": "sites",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/sites",
+              "auth_role": "tenant_admin|seo_manager|read_only",
+              "output": "Site[]"
+            },
+            {
+              "method": "POST",
+              "path": "/sites",
+              "auth_role": "tenant_admin",
+              "input": {
+                "name": "string",
+                "primary_domain": "string",
+                "additional_domains": "string[]",
+                "default_language": "string",
+                "target_countries": "string[]",
+                "cms_type": "string",
+                "brand_tone": "object",
+                "enabled_features": "string[]"
+              },
+              "output": "Site"
+            },
+            {
+              "method": "GET",
+              "path": "/sites/{site_id}",
+              "auth_role": "tenant_admin|seo_manager|read_only",
+              "output": "Site"
+            }
+          ]
+        },
+        {
+          "resource": "crawl",
+          "endpoints": [
+            {
+              "method": "POST",
+              "path": "/sites/{site_id}/crawl",
+              "auth_role": "tenant_admin|seo_manager",
+              "input": {
+                "max_depth": "int",
+                "max_pages": "int",
+                "allowed_domains": "string[]",
+                "user_agent": "string",
+                "crawl_delay_ms": "int"
+              },
+              "output": "CrawlJob"
+            },
+            {
+              "method": "GET",
+              "path": "/sites/{site_id}/crawl_jobs",
+              "auth_role": "tenant_admin|seo_manager|read_only",
+              "output": "CrawlJob[]"
+            },
+            {
+              "method": "GET",
+              "path": "/crawl_jobs/{job_id}/pages",
+              "auth_role": "tenant_admin|seo_manager|read_only",
+              "query": { "status_code": "int?", "limit": "int?", "offset": "int?" },
+              "output": "CrawlPage[]"
+            }
+          ]
+        },
+        {
+          "resource": "audits",
+          "endpoints": [
+            {
+              "method": "POST",
+              "path": "/sites/{site_id}/audits",
+              "auth_role": "tenant_admin|seo_manager",
+              "input": {
+                "crawl_job_id": "string|null"
+              },
+              "output": "AuditRun"
+            },
+            {
+              "method": "GET",
+              "path": "/sites/{site_id}/audits",
+              "auth_role": "tenant_admin|seo_manager|read_only",
+              "output": "AuditRun[]"
+            },
+            {
+              "method": "GET",
+              "path": "/audits/{audit_run_id}",
+              "auth_role": "tenant_admin|seo_manager|read_only",
+              "output": {
+                "audit_run": "AuditRun",
+                "issues": "SeoIssue[]"
+              }
+            }
+          ]
+        },
+        {
+          "resource": "keywords",
+          "endpoints": [
+            {
+              "method": "POST",
+              "path": "/sites/{site_id}/keywords/discover",
+              "auth_role": "tenant_admin|seo_manager",
+              "input": {
+                "country": "string",
+                "language": "string",
+                "max_keywords": "int"
+              },
+              "output": {
+                "keywords": "Keyword[]",
+                "job_id": "string"
+              }
+            },
+            {
+              "method": "POST",
+              "path": "/sites/{site_id}/keywords/expand",
+              "auth_role": "tenant_admin|seo_manager",
+              "input": {
+                "seed_keywords": "string[]",
+                "country": "string",
+                "language": "string",
+                "max_keywords": "int"
+              },
+              "output": {
+                "keywords": "Keyword[]",
+                "job_id": "string"
+              }
+            },
+            {
+              "method": "GET",
+              "path": "/sites/{site_id}/keywords",
+              "auth_role": "tenant_admin|seo_manager|read_only",
+              "query": {
+                "cluster_id": "string?",
+                "search": "string?",
+                "limit": "int?",
+                "offset": "int?"
+              },
+              "output": "Keyword[]"
+            },
+            {
+              "method": "GET",
+              "path": "/sites/{site_id}/keyword_clusters",
+              "auth_role": "tenant_admin|seo_manager|read_only",
+              "output": "KeywordCluster[]"
+            }
+          ]
+        },
+        {
+          "resource": "seo_plan",
+          "endpoints": [
+            {
+              "method": "POST",
+              "path": "/sites/{site_id}/seo_plan/generate",
+              "auth_role": "tenant_admin|seo_manager",
+              "input": {
+                "timeframe_months": "int",
+                "goal": "string"
+              },
+              "output": {
+                "seo_plan": "SeoPlan",
+                "tasks": "SeoTask[]"
+              }
+            },
+            {
+              "method": "GET",
+              "path": "/sites/{site_id}/seo_plans",
+              "auth_role": "tenant_admin|seo_manager|read_only",
+              "output": "SeoPlan[]"
+            },
+            {
+              "method": "GET",
+              "path": "/seo_plans/{plan_id}/tasks",
+              "auth_role": "tenant_admin|seo_manager|read_only",
+              "output": "SeoTask[]"
+            },
+            {
+              "method": "PATCH",
+              "path": "/seo_tasks/{task_id}",
+              "auth_role": "tenant_admin|seo_manager",
+              "input": {
+                "status": "string",
+                "title": "string?",
+                "description": "string?"
+              },
+              "output": "SeoTask"
+            }
+          ]
+        },
+        {
+          "resource": "content",
+          "endpoints": [
+            {
+              "method": "POST",
+              "path": "/sites/{site_id}/content/briefs",
+              "auth_role": "tenant_admin|seo_manager",
+              "input": {
+                "keyword_cluster_id": "string",
+                "preferred_page_type": "string?",
+                "preferred_language": "string?",
+                "word_count": "string?"
+              },
+              "output": "ContentBrief"
+            },
+            {
+              "method": "POST",
+              "path": "/sites/{site_id}/content/drafts",
+              "auth_role": "tenant_admin|seo_manager",
+              "input": {
+                "content_brief_id": "string",
+                "generate_full_draft": "boolean"
+              },
+              "output": "ContentDraft"
+            },
+            {
+              "method": "GET",
+              "path": "/sites/{site_id}/content/briefs",
+              "auth_role": "tenant_admin|seo_manager|read_only",
+              "output": "ContentBrief[]"
+            },
+            {
+              "method": "GET",
+              "path": "/sites/{site_id}/content/drafts",
+              "auth_role": "tenant_admin|seo_manager|read_only",
+              "output": "ContentDraft[]"
+            }
+          ]
+        },
+        {
+          "resource": "scheduled_jobs",
+          "endpoints": [
+            {
+              "method": "POST",
+              "path": "/sites/{site_id}/scheduled_jobs",
+              "auth_role": "tenant_admin",
+              "input": {
+                "job_type": "string",
+                "cron_expression": "string",
+                "config": "object"
+              },
+              "output": "ScheduledJob"
+            },
+            {
+              "method": "GET",
+              "path": "/sites/{site_id}/scheduled_jobs",
+              "auth_role": "tenant_admin|seo_manager",
+              "output": "ScheduledJob[]"
+            }
+          ]
+        },
+        {
+          "resource": "dashboard",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/sites/{site_id}/dashboard",
+              "auth_role": "tenant_admin|seo_manager|read_only",
+              "output": {
+                "latest_audit": "AuditRun|null",
+                "open_issues_by_severity": "object",
+                "keyword_opportunity_count": "int",
+                "content_briefs_count": "int",
+                "content_drafts_count": "int"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "agent_framework": {
+      "preferred": "langgraph",
+      "tools": [
+        {
+          "name": "start_crawl",
+          "description": "Start a Deepcrawl job for a site.",
+          "input_schema": {
+            "site_id": "string",
+            "config": {
+              "max_depth": "int",
+              "max_pages": "int",
+              "allowed_domains": "string[]",
+              "user_agent": "string",
+              "crawl_delay_ms": "int"
+            }
+          },
+          "output_schema": {
+            "crawl_job_id": "string"
+          }
+        },
+        {
+          "name": "get_crawl_result",
+          "description": "Get structured crawl data for a completed job.",
+          "input_schema": {
+            "crawl_job_id": "string"
+          },
+          "output_schema": {
+            "pages": "CrawlPage[]"
+          }
+        },
+        {
+          "name": "discover_keywords_for_site",
+          "description": "Use DataForSEO Keywords for Site endpoint.",
+          "input_schema": {
+            "site_id": "string",
+            "country": "string",
+            "language": "string",
+            "max_keywords": "int"
+          },
+          "output_schema": {
+            "keywords": "Keyword[]"
+          }
+        },
+        {
+          "name": "expand_keywords",
+          "description": "Use DataForSEO Keywords for Keywords endpoint to expand.",
+          "input_schema": {
+            "seed_keywords": "string[]",
+            "country": "string",
+            "language": "string",
+            "max_keywords": "int"
+          },
+          "output_schema": {
+            "keywords": "Keyword[]"
+          }
+        },
+        {
+          "name": "get_keyword_metrics",
+          "description": "Retrieve metrics for keywords (volume, CPC, etc.).",
+          "input_schema": {
+            "keyword_ids": "string[]",
+            "country": "string",
+            "language": "string"
+          },
+          "output_schema": {
+            "keywords": "Keyword[]"
+          }
+        },
+        {
+          "name": "save_audit_issues",
+          "description": "Persist SEO issues detected by the agent.",
+          "input_schema": {
+            "site_id": "string",
+            "audit_run_id": "string",
+            "issues": "SeoIssue[]"
+          },
+          "output_schema": {
+            "success": "boolean"
+          }
+        },
+        {
+          "name": "save_seo_plan",
+          "description": "Persist generated SEO plan and tasks.",
+          "input_schema": {
+            "site_id": "string",
+            "plan": "SeoPlan",
+            "tasks": "SeoTask[]"
+          },
+          "output_schema": {
+            "seo_plan_id": "string"
+          }
+        },
+        {
+          "name": "save_content_brief",
+          "description": "Persist generated content brief.",
+          "input_schema": {
+            "site_id": "string",
+            "brief": "ContentBrief"
+          },
+          "output_schema": {
+            "content_brief_id": "string"
+          }
+        },
+        {
+          "name": "save_content_draft",
+          "description": "Persist generated content draft.",
+          "input_schema": {
+            "site_id": "string",
+            "draft": "ContentDraft"
+          },
+          "output_schema": {
+            "content_draft_id": "string"
+          }
+        },
+        {
+          "name": "send_notification",
+          "description": "Send notification to a user.",
+          "input_schema": {
+            "user_id": "string",
+            "message": "string",
+            "severity": "string"
+          },
+          "output_schema": {
+            "notification_id": "string"
+          }
+        }
+      ],
+      "workflows": [
+        {
+          "id": "full_seo_audit_workflow",
+          "description": "Run crawl, then technical audit using LLM.",
+          "steps": [
+            "fetch_site_config",
+            "start_crawl",
+            "wait_for_crawl_completion",
+            "fetch_crawl_results",
+            "analyze_technical_issues_with_llm",
+            "save_audit_issues",
+            "compute_audit_score",
+            "save_audit_summary",
+            "send_notification"
+          ]
+        },
+        {
+          "id": "keyword_research_workflow",
+          "description": "Run DataForSEO keyword discovery + expansion + metrics + clustering.",
+          "steps": [
+            "fetch_site_config",
+            "call_discover_keywords_for_site",
+            "optionally_call_expand_keywords_with_llm_selected_seeds",
+            "call_get_keyword_metrics",
+            "cluster_keywords_with_llm_or_algorithm",
+            "map_clusters_to_existing_or_recommended_pages",
+            "save_keywords_and_clusters"
+          ]
+        },
+        {
+          "id": "seo_plan_workflow",
+          "description": "Combine audit and keyword data into an SEO roadmap.",
+          "steps": [
+            "fetch_latest_audit_and_issues",
+            "fetch_keyword_clusters",
+            "generate_seo_plan_with_llm",
+            "save_seo_plan",
+            "send_notification"
+          ]
+        },
+        {
+          "id": "content_generation_workflow",
+          "description": "Generate brief and optionally full draft for a keyword cluster.",
+          "steps": [
+            "fetch_keyword_cluster",
+            "generate_content_brief_with_llm",
+            "save_content_brief",
+            "if_generate_full_draft",
+            "generate_content_draft_with_llm",
+            "save_content_draft"
+          ]
+        }
+      ]
+    },
+    "non_functional": {
+      "multi_tenancy": {
+        "strategy": "tenant_id_on_all_rows",
+        "api_isolation": true
+      },
+      "performance": {
+        "dashboard_target_ms": 2000,
+        "async_jobs": true
+      },
+      "reliability": {
+        "retry_external_apis": true,
+        "max_retries": 3,
+        "backoff_strategy": "exponential"
+      },
+      "cost_control": {
+        "limits_per_tenant": {
+          "max_pages_per_crawl": 20000,
+          "max_keyword_queries_per_month": 1000
+        }
+      },
+      "observability": {
+        "log_agent_workflows": true,
+        "log_external_api_calls": true
+      },
+      "extensibility": {
+        "pluggable_crawler": true,
+        "pluggable_keyword_api": true,
+        "pluggable_llm_provider": true
+      }
+    }
+  }

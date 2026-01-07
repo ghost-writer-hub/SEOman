@@ -1,0 +1,271 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: seoman-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-seoman}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-seoman_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-seoman}
+      PGDATA: /var/lib/postgresql/data/pgdata
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/database/init:/docker-entrypoint-initdb.d
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-seoman}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - seoman_network
+
+  redis:
+    image: redis:7-alpine
+    container_name: seoman-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-seoman_dev_password}
+    volumes:
+      - redis_data:/data
+    ports:
+      - "${REDIS_PORT:-6380}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - seoman_network
+
+  minio:
+    image: minio/minio:latest
+    container_name: seoman-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-seoman_admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-seoman_minio_password}
+      MINIO_BROWSER: "on"
+    volumes:
+      - minio_data:/data
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - seoman_network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: development
+    container_name: seoman-backend
+    restart: unless-stopped
+    environment:
+      ENVIRONMENT: development
+      DATABASE_URL: postgresql://${POSTGRES_USER:-seoman}:${POSTGRES_PASSWORD:-seoman_dev_password}@postgres:5432/${POSTGRES_DB:-seoman}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-seoman_dev_password}@redis:6379/0
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-seoman_admin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-seoman_minio_password}
+      MINIO_USE_SSL: "false"
+      MINIO_BUCKET: ${MINIO_BUCKET:-seoman-files}
+      LLM_PROVIDER: ${LLM_PROVIDER:-local}
+      LLM_BASE_URL: ${LMM_BASE_URL:-http://host.docker.internal:1234/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-not-needed-for-local}
+      LLM_MODEL: ${LLM_MODEL:-llama-3-8b-instruct}
+      CASDOOR_ENDPOINT: ${CASDOOR_ENDPOINT:-http://casdoor:8080}
+      CASDOOR_CLIENT_ID: ${CASDOOR_CLIENT_ID:-seoman-backend}
+      CASDOOR_CLIENT_SECRET: ${CASDOOR_CLIENT_SECRET:-seoman-backend-secret}
+      CASDOOR_ORGANIZATION: ${CASDOOR_ORGANIZATION:-seoman}
+      CASDOOR_APPLICATION: ${CASDOOR_APPLICATION:-seoman-app}
+      JWT_SECRET: ${JWT_SECRET:-dev_jwt_secret_change_in_production}
+      DEEPCRAWL_API_URL: ${DEEPCRAWL_API_URL:-http://deepcrawl:8080}
+      DATAFORSEO_API_URL: ${DATAFORSEO_API_URL:-https://api.dataforseo.com}
+      DATAFORSEO_API_LOGIN: ${DATAFORSEO_API_LOGIN}
+      DATAFORSEO_API_PASSWORD: ${DATAFORSEO_API_PASSWORD}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3011,http://frontend:3000}
+      LOG_LEVEL: ${LOG_LEVEL:-DEBUG}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+    volumes:
+      - ./backend:/app
+      - backend_venv:/app/.venv
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - seoman_network
+      - proxy
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: development
+    container_name: seoman-worker
+    restart: unless-stopped
+    command: celery -A app.worker worker --loglevel=info --concurrency=2
+    environment:
+      ENVIRONMENT: development
+      DATABASE_URL: postgresql://${POSTGRES_USER:-seoman}:${POSTGRES_PASSWORD:-seoman_dev_password}@postgres:5432/${POSTGRES_DB:-seoman}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-seoman_dev_password}@redis:6379/0
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-seoman_admin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-seoman_minio_password}
+      MINIO_USE_SSL: "false"
+      MINIO_BUCKET: ${MINIO_BUCKET:-seoman-files}
+      LLM_PROVIDER: ${LLM_PROVIDER:-local}
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:1234/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-not-needed-for-local}
+      LLM_MODEL: ${LLM_MODEL:-llama-3-8b-instruct}
+      DEEPCRAWL_API_URL: ${DEEPCRAWL_API_URL:-http://deepcrawl:8080}
+      DATAFORSEO_API_URL: ${DATAFORSEO_API_URL:-https://api.dataforseo.com}
+      DATAFORSEO_API_LOGIN: ${DATAFORSEO_API_LOGIN}
+      DATAFORSEO_API_PASSWORD: ${DATAFORSEO_API_PASSWORD}
+      LOG_LEVEL: ${LOG_LEVEL:-DEBUG}
+    volumes:
+      - ./backend:/app
+      - backend_venv:/app/.venv
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - seoman_network
+
+  beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: development
+    container_name: seoman-beat
+    restart: unless-stopped
+    command: celery -A app.worker beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    environment:
+      ENVIRONMENT: development
+      DATABASE_URL: postgresql://${POSTGRES_USER:-seoman}:${POSTGRES_PASSWORD:-seoman_dev_password}@postgres:5432/${POSTGRES_DB:-seoman}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-seoman_dev_password}@redis:6379/0
+      LOG_LEVEL: ${LOG_LEVEL:-DEBUG}
+    volumes:
+      - ./backend:/app
+      - backend_venv:/app/.venv
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - seoman_network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: development
+    container_name: seoman-frontend
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000/api/v1}
+      NEXT_PUBLIC_CASDOOR_ENDPOINT: ${NEXT_PUBLIC_CASDOOR_ENDPOINT:-http://localhost:8080}
+      NEXT_PUBLIC_CASDOOR_CLIENT_ID: ${NEXT_PUBLIC_CASDOOR_CLIENT_ID:-seoman-frontend}
+      NEXT_PUBLIC_CASDOOR_APPLICATION: ${NEXT_PUBLIC_CASDOOR_APPLICATION:-seoman-app}
+      NEXT_PUBLIC_ENABLE_GOOGLE_AUTH: ${NEXT_PUBLIC_ENABLE_GOOGLE_AUTH:-true}
+      NODE_ENV: development
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    ports:
+      - "${FRONTEND_PORT:-3011}:3000"
+    depends_on:
+      - backend
+    networks:
+      - seoman_network
+      - proxy
+
+  # casdoor-server:
+  #   image: casbin/casdoor:latest
+  #   container_name: seoman-casdoor-server
+  #   restart: unless-stopped
+  #   entrypoint: /bin/sh -c "./server"
+  #   environment:
+  #     driverName: postgres
+  #     dataSourceName: "host=postgres port=5432 sslmode=disable dbname=casdoor user=postgres password=${POSTGRES_PASSWORD:-seoman_dev_password}"
+  #     redisEndpoint: redis:6379,password=${REDIS_PASSWORD:-seoman_dev_password},db=2
+  #     appName: seoman-app
+  #     organizationName: seoman
+  #     port: 8080
+  #     sessionConfig: "{\"enableSetCookie\":true,\"sameSite\":\"Lax\",\"clientSecret\":\"${CASDOOR_JWT_SECRET:-casdoor_secret}\"}"
+  #   ports:
+  #     - "${CASDOOR_SERVER_PORT:-8005}:8080"
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #   volumes:
+  #     - casdoor_data:/conf
+  #   networks:
+  #     - seoman_network
+  #     - proxy
+
+  # casdoor-web:
+  #   image: casbin/casdoor-all-in-one:latest
+  #   container_name: seoman-casdoor-web
+  #   restart: unless-stopped
+  #   environment:
+  #     CASDOOR_SERVER_URL: http://casdoor-server:8080
+  #   ports:
+  #     - "${CASDOOR_WEB_PORT:-7001}:8001"
+  #   depends_on:
+  #     - casdoor-server
+  #   networks:
+  #     - seoman_network
+  #     - proxy
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  minio_data:
+    driver: local
+  backend_venv:
+    driver: local
+  casdoor_data:
+    driver: local
+
+networks:
+  seoman_network:
+    driver: bridge
+  proxy:
+    external: true
+    name: proxy

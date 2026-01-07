@@ -1,0 +1,23 @@
+# Quick SEO Analyzer Service
+# Docker configuration for python-seo-analyzer integration
+
+version: '3.9'
+
+services:
+  quick-analyzer:
+    build:
+      context: ./quick-analyzer
+      dockerfile: Dockerfile
+    container_name: seoman-quick-analyzer
+    restart: unless-stopped
+    environment:
+      LOG_LEVEL: ${QUICK_ANALYZER_LOG_LEVEL:-info}
+    ports:
+      - "${QUICK_ANALYZER_PORT:-8081}:8080"
+    networks:
+      - seoman_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

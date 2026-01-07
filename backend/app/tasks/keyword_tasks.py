@@ -1,0 +1,328 @@
+"""
+Keyword Tasks
+
+Background tasks for keyword research and tracking.
+"""
+
+import asyncio
+from datetime import datetime
+from typing import List, Dict, Any
+from uuid import UUID
+
+from celery import shared_task
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.database import async_session_maker
+from app.models.keyword import Keyword, KeywordCluster
+from app.models.site import Site
+from app.integrations.dataforseo import DataForSEOClient
+from app.integrations.llm import get_llm_client, cluster_keywords
+
+
+def run_async(coro):
+    """Helper to run async code in sync context."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+@shared_task(bind=True, max_retries=3)
+def discover_keywords(
+    self,
+    site_id: str,
+    tenant_id: str,
+    seed_keywords: List[str],
+    location: str = "United States",
+    language: str = "en",
+):
+    """Discover new keywords from seed keywords."""
+    return run_async(_discover_keywords(
+        self, site_id, tenant_id, seed_keywords, location, language
+    ))
+
+
+async def _discover_keywords(
+    task,
+    site_id: str,
+    tenant_id: str,
+    seed_keywords: List[str],
+    location: str,
+    language: str,
+):
+    """Async implementation of keyword discovery."""
+    async with async_session_maker() as session:
+        site = await session.get(Site, UUID(site_id))
+        
+        if not site:
+            return {"error": "Site not found"}
+        
+        try:
+            client = DataForSEOClient()
+            
+            all_keywords = []
+            
+            for seed in seed_keywords:
+                # Get keyword ideas
+                result = await client.get_keyword_ideas(
+                    keyword=seed,
+                    location_name=location,
+                    language_code=language,
+                    limit=100,
+                )
+                
+                if result.get("success"):
+                    keywords_data = result.get("keywords", [])
+                    all_keywords.extend(keywords_data)
+            
+            # Deduplicate by keyword text
+            seen = set()
+            unique_keywords = []
+            for kw in all_keywords:
+                text = kw.get("keyword", "").lower()
+                if text and text not in seen:
+                    seen.add(text)
+                    unique_keywords.append(kw)
+            
+            # Save keywords to database
+            saved_count = 0
+            for kw_data in unique_keywords:
+                # Check if already exists
+                stmt = select(Keyword).where(
+                    Keyword.site_id == site.id,
+                    Keyword.keyword == kw_data.get("keyword"),
+                )
+                result = await session.execute(stmt)
+                existing = result.scalar_one_or_none()
+                
+                if existing:
+                    # Update existing
+                    existing.search_volume = kw_data.get("search_volume")
+                    existing.cpc = kw_data.get("cpc")
+                    existing.competition = kw_data.get("competition")
+                    existing.updated_at = datetime.utcnow()
+                else:
+                    # Create new
+                    keyword = Keyword(
+                        site_id=site.id,
+                        tenant_id=UUID(tenant_id),
+                        keyword=kw_data.get("keyword"),
+                        search_volume=kw_data.get("search_volume"),
+                        cpc=kw_data.get("cpc"),
+                        competition=kw_data.get("competition"),
+                        difficulty=kw_data.get("difficulty"),
+                        intent=kw_data.get("intent"),
+                    )
+                    session.add(keyword)
+                    saved_count += 1
+            
+            await session.commit()
+            
+            return {
+                "site_id": site_id,
+                "keywords_discovered": len(unique_keywords),
+                "new_keywords_saved": saved_count,
+            }
+            
+        except Exception as e:
+            raise task.retry(exc=e, countdown=60)
+
+
+@shared_task(bind=True, max_retries=3)
+def update_keyword_rankings(self, site_id: str, tenant_id: str):
+    """Update rankings for all tracked keywords of a site."""
+    return run_async(_update_keyword_rankings(self, site_id, tenant_id))
+
+
+async def _update_keyword_rankings(task, site_id: str, tenant_id: str):
+    """Check current rankings for site keywords."""
+    async with async_session_maker() as session:
+        site = await session.get(Site, UUID(site_id))
+        
+        if not site:
+            return {"error": "Site not found"}
+        
+        # Get keywords to check
+        stmt = select(Keyword).where(
+            Keyword.site_id == site.id,
+            Keyword.is_tracked == True,
+        )
+        result = await session.execute(stmt)
+        keywords = result.scalars().all()
+        
+        if not keywords:
+            return {"message": "No tracked keywords found"}
+        
+        try:
+            client = DataForSEOClient()
+            updated = 0
+            
+            for keyword in keywords:
+                # Get SERP data
+                serp_result = await client.get_serp(
+                    keyword=keyword.keyword,
+                    location_name="United States",
+                    language_code="en",
+                )
+                
+                if serp_result.get("success"):
+                    organic = serp_result.get("organic", [])
+                    
+                    # Find our position
+                    position = None
+                    for i, item in enumerate(organic, 1):
+                        if site.url in item.get("url", ""):
+                            position = i
+                            break
+                    
+                    # Update keyword
+                    keyword.current_position = position
+                    keyword.previous_position = keyword.current_position
+                    keyword.last_checked_at = datetime.utcnow()
+                    updated += 1
+            
+            await session.commit()
+            
+            return {
+                "site_id": site_id,
+                "keywords_checked": len(keywords),
+                "keywords_updated": updated,
+            }
+            
+        except Exception as e:
+            raise task.retry(exc=e, countdown=120)
+
+
+@shared_task(bind=True)
+def update_all_rankings(self):
+    """Update rankings for all sites (scheduled task)."""
+    return run_async(_update_all_rankings())
+
+
+async def _update_all_rankings():
+    """Check rankings for all sites with tracked keywords."""
+    async with async_session_maker() as session:
+        # Get all sites with tracked keywords
+        stmt = (
+            select(Site)
+            .join(Keyword)
+            .where(Keyword.is_tracked == True)
+            .distinct()
+        )
+        result = await session.execute(stmt)
+        sites = result.scalars().all()
+        
+        for site in sites:
+            # Queue individual update tasks
+            update_keyword_rankings.delay(str(site.id), str(site.tenant_id))
+        
+        return {"sites_queued": len(sites)}
+
+
+@shared_task(bind=True)
+def cluster_site_keywords(self, site_id: str, tenant_id: str):
+    """Cluster keywords for a site using AI."""
+    return run_async(_cluster_site_keywords(site_id, tenant_id))
+
+
+async def _cluster_site_keywords(site_id: str, tenant_id: str):
+    """Use LLM to cluster keywords by topic and intent."""
+    async with async_session_maker() as session:
+        site = await session.get(Site, UUID(site_id))
+        
+        if not site:
+            return {"error": "Site not found"}
+        
+        # Get all keywords for site
+        stmt = select(Keyword).where(Keyword.site_id == site.id)
+        result = await session.execute(stmt)
+        keywords = result.scalars().all()
+        
+        if len(keywords) < 3:
+            return {"message": "Not enough keywords to cluster"}
+        
+        # Get keyword texts
+        keyword_texts = [kw.keyword for kw in keywords]
+        
+        try:
+            llm = get_llm_client()
+            
+            if not await llm.health_check():
+                return {"error": "LLM service unavailable"}
+            
+            # Use LLM to cluster
+            cluster_result = await cluster_keywords(llm, keyword_texts)
+            
+            clusters_created = 0
+            for cluster_data in cluster_result.get("clusters", []):
+                # Create or update cluster
+                cluster = KeywordCluster(
+                    site_id=site.id,
+                    tenant_id=UUID(tenant_id),
+                    name=cluster_data.get("name"),
+                    intent=cluster_data.get("intent"),
+                    recommended_content_type=cluster_data.get("recommended_content_type"),
+                )
+                session.add(cluster)
+                await session.flush()
+                
+                # Assign keywords to cluster
+                cluster_keyword_texts = cluster_data.get("keywords", [])
+                for kw in keywords:
+                    if kw.keyword.lower() in [k.lower() for k in cluster_keyword_texts]:
+                        kw.cluster_id = cluster.id
+                
+                clusters_created += 1
+            
+            await session.commit()
+            
+            return {
+                "site_id": site_id,
+                "clusters_created": clusters_created,
+                "keywords_clustered": len(keywords),
+            }
+            
+        except Exception as e:
+            return {"error": str(e)}
+
+
+@shared_task(bind=True)
+def analyze_keyword_gaps(
+    self,
+    site_id: str,
+    competitor_urls: List[str],
+    tenant_id: str,
+):
+    """Find keyword gaps compared to competitors."""
+    return run_async(_analyze_keyword_gaps(site_id, competitor_urls, tenant_id))
+
+
+async def _analyze_keyword_gaps(
+    site_id: str,
+    competitor_urls: List[str],
+    tenant_id: str,
+):
+    """Identify keywords competitors rank for that we don't."""
+    async with async_session_maker() as session:
+        site = await session.get(Site, UUID(site_id))
+        
+        if not site:
+            return {"error": "Site not found"}
+        
+        try:
+            client = DataForSEOClient()
+            
+            # This would use DataForSEO's competitor analysis
+            # For now, return placeholder
+            
+            return {
+                "site_id": site_id,
+                "competitors_analyzed": len(competitor_urls),
+                "gaps_found": 0,  # Placeholder
+            }
+            
+        except Exception as e:
+            return {"error": str(e)}
