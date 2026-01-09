@@ -94,20 +94,46 @@ class SEOAuditEngine:
         return self.results
 
     def calculate_score(self) -> int:
-        """Calculate overall score (0-100)."""
+        """Calculate overall score (0-100) based on passed checks and severity weighting."""
         if not self.results:
             return 0
 
-        severity_weights = {"critical": 10, "high": 5, "medium": 2, "low": 1}
-        total_penalty = 0
+        # Severity weights for failed checks (higher = worse)
+        severity_weights = {"critical": 4.0, "high": 2.5, "medium": 1.5, "low": 1.0}
+
+        total_weighted_checks = 0
+        weighted_passed = 0
 
         for result in self.results:
-            if not result.passed:
-                weight = severity_weights.get(result.severity, 1)
-                penalty = weight * min(result.affected_count, 10)
-                total_penalty += penalty
+            weight = severity_weights.get(result.severity, 1.0)
+            total_weighted_checks += weight
 
-        score = max(0, 100 - total_penalty)
+            if result.passed:
+                weighted_passed += weight
+            else:
+                # Partial penalty based on affected count (diminishing impact)
+                # A check with 1 affected URL gets 0% credit
+                # A check with many affected URLs still gets 0% credit
+                # This prevents double-penalizing for scope
+                pass
+
+        if total_weighted_checks == 0:
+            return 100
+
+        # Base score from weighted pass rate
+        base_score = (weighted_passed / total_weighted_checks) * 100
+
+        # Apply a small additional penalty for high-impact issues (many affected URLs)
+        impact_penalty = 0
+        for result in self.results:
+            if not result.passed and result.affected_count > 5:
+                # Small penalty for widespread issues (max 1 point per issue)
+                impact_penalty += min(1.0, result.affected_count / 20)
+
+        # Cap impact penalty at 10 points
+        impact_penalty = min(10, impact_penalty)
+
+        score = max(0, min(100, round(base_score - impact_penalty)))
         return score
 
     def get_summary(self) -> dict:
