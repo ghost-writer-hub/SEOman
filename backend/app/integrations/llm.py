@@ -59,10 +59,13 @@ class LLMClient:
     
     def __init__(self, config: Optional[LLMConfig] = None):
         if config is None:
+            # Use OPENAI_API_KEY as fallback if LLM_API_KEY is empty
+            api_key = settings.LLM_API_KEY or settings.OPENAI_API_KEY
+
             config = LLMConfig(
                 provider=LLMProvider(settings.LLM_PROVIDER),
                 base_url=settings.LLM_BASE_URL,
-                api_key=settings.LLM_API_KEY,
+                api_key=api_key,
                 model=settings.LLM_MODEL,
             )
         self.config = config

@@ -35,10 +35,15 @@ class Settings(BaseSettings):
     B2_BUCKET: str = ""
     B2_REGION: str = "us-west-004"
     
-    LLM_PROVIDER: str = "local"
-    LLM_BASE_URL: str = "http://localhost:1234/v1"
-    LLM_API_KEY: str = "not-needed"
-    LLM_MODEL: str = "llama-3-8b-instruct"
+    # LLM Configuration
+    # Provider: "openai", "anthropic", or "local" (LM Studio)
+    LLM_PROVIDER: str = "openai"
+    LLM_BASE_URL: str = "https://api.openai.com/v1"
+    LLM_API_KEY: str = ""  # Set OPENAI_API_KEY in env
+    LLM_MODEL: str = "gpt-4o-mini"
+
+    # OpenAI-specific (alias for LLM_API_KEY)
+    OPENAI_API_KEY: str = ""
     
     JWT_SECRET: str
     JWT_ALGORITHM: str = "HS256"

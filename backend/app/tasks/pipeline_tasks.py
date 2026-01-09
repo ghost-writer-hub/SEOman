@@ -29,7 +29,9 @@ from app.models.plan import SeoPlan, SeoTask
 from app.models.crawl import JobStatus
 from app.services.crawler import SEOmanCrawler, CrawlConfig, crawl_site, pages_to_dict_list
 from app.services.audit_engine import SEOAuditEngine, CrawlData, fetch_robots_txt, fetch_sitemap
+from app.services.template_classifier import classify_site_templates, TemplateClassificationResult
 from app.integrations.llm import get_llm_client, analyze_seo_issues
+from app.integrations.dataforseo import DataForSEOClient
 from app.integrations.storage import get_storage_client, SEOmanStoragePaths
 from app.services.markdown_generator import MarkdownGenerator, generate_full_report_package
 from app.agents.workflows.plan_workflow import run_plan_workflow
@@ -95,6 +97,10 @@ async def _run_full_seo_pipeline(
     generate_briefs = options.get("generate_briefs", True)
     plan_duration_weeks = options.get("plan_duration_weeks", 12)
     seed_keywords = options.get("seed_keywords", [])
+    do_keyword_research = options.get("keyword_research", True)
+    classify_templates = options.get("classify_templates", True)
+    target_country = options.get("country", "ES")  # Default to Spain for hotel sites
+    target_language = options.get("language", "es")
     
     report_id = str(uuid4())
     started_at = datetime.utcnow()
@@ -137,13 +143,77 @@ async def _run_full_seo_pipeline(
                 crawl_id=report_id,
             )
             pages_dict = pages_to_dict_list(pages)
-            logger.info(f"[PIPELINE v2.0] Step 2/8: Complete in {time.time() - step_start:.2f}s - crawled {len(pages)} pages")
-            
+            logger.info(f"[PIPELINE v2.0] Step 2/10: Complete in {time.time() - step_start:.2f}s - crawled {len(pages)} pages")
+            logger.info(f"[PIPELINE v2.0] Sitemap had {sitemap_info.get('url_count', 0)} URLs")
+
             result["pages_crawled"] = len(pages)
-            
-            # Step 3: Run 100-point audit
+            result["sitemap_urls"] = sitemap_info.get("url_count", 0)
+
+            # Step 3: Classify pages into templates
             step_start = time.time()
-            logger.info("[PIPELINE v2.0] Step 3/8: Running 100-point SEO audit...")
+            template_data: dict[str, Any] = {}
+            if classify_templates and pages_dict:
+                logger.info("[PIPELINE v2.0] Step 3/10: Classifying pages into templates...")
+                try:
+                    template_result = await classify_site_templates(url, pages_dict, use_llm=True)
+                    template_data = template_result.to_dict()
+                    template_count = len(template_result.templates)
+                    logger.info(f"[PIPELINE v2.0] Step 3/10: Complete in {time.time() - step_start:.2f}s - {template_count} templates identified")
+                    result["templates_count"] = template_count
+                except Exception as e:
+                    logger.warning(f"[PIPELINE v2.0] Step 3/10: Template classification failed (non-critical) - {e}")
+            else:
+                logger.info("[PIPELINE v2.0] Step 3/10: Skipped template classification")
+
+            # Step 4: Keyword research with DataForSEO
+            step_start = time.time()
+            keyword_data: dict[str, Any] = {"keywords": [], "clusters": []}
+            if do_keyword_research and seed_keywords:
+                logger.info(f"[PIPELINE v2.0] Step 4/10: Performing keyword research for {len(seed_keywords)} seed keywords...")
+                try:
+                    from urllib.parse import urlparse
+                    domain = urlparse(url).netloc
+
+                    dataforseo = DataForSEOClient()
+
+                    # Get keywords for the domain
+                    domain_keywords = await dataforseo.keywords_for_site(
+                        domain=domain,
+                        country=target_country,
+                        language=target_language,
+                        limit=50,
+                    )
+
+                    # Expand from seed keywords
+                    if seed_keywords:
+                        expanded_keywords = await dataforseo.keywords_for_keywords(
+                            seed_keywords=seed_keywords[:5],
+                            country=target_country,
+                            language=target_language,
+                            limit=50,
+                        )
+                        domain_keywords.extend(expanded_keywords)
+
+                    # Deduplicate keywords
+                    seen = set()
+                    unique_keywords = []
+                    for kw in domain_keywords:
+                        kw_text = kw.get("text", "").lower()
+                        if kw_text and kw_text not in seen:
+                            seen.add(kw_text)
+                            unique_keywords.append(kw)
+
+                    keyword_data["keywords"] = unique_keywords[:100]
+                    logger.info(f"[PIPELINE v2.0] Step 4/10: Complete in {time.time() - step_start:.2f}s - {len(unique_keywords)} keywords found")
+                    result["keywords_found"] = len(unique_keywords)
+                except Exception as e:
+                    logger.warning(f"[PIPELINE v2.0] Step 4/10: Keyword research failed (non-critical) - {e}")
+            else:
+                logger.info("[PIPELINE v2.0] Step 4/10: Skipped keyword research (no seed keywords or disabled)")
+
+            # Step 5: Run 100-point audit
+            step_start = time.time()
+            logger.info("[PIPELINE v2.0] Step 5/10: Running 100-point SEO audit...")
             crawl_data = CrawlData(
                 base_url=url,
                 pages=pages_dict,
@@ -164,75 +234,79 @@ async def _run_full_seo_pipeline(
                 "summary": audit_summary,
             }
             
-            logger.info(f"[PIPELINE v2.0] Step 3/8: Complete in {time.time() - step_start:.2f}s - score={score}, checks={len(audit_results)}, issues={len(issues)}")
+            logger.info(f"[PIPELINE v2.0] Step 5/10: Complete in {time.time() - step_start:.2f}s - score={score}, checks={len(audit_results)}, issues={len(issues)}")
             
             result["score"] = score
             result["issues_count"] = len(issues)
             result["checks_run"] = len(audit_results)
             
-            # Step 4: Get AI recommendations (if LLM available)
+            # Step 6: Get AI recommendations (if LLM available)
             step_start = time.time()
-            logger.info("[PIPELINE v2.0] Step 4/8: Getting AI recommendations...")
+            logger.info("[PIPELINE v2.0] Step 6/10: Getting AI recommendations...")
             try:
                 llm = get_llm_client()
                 if await llm.health_check():
-                    logger.info(f"[PIPELINE v2.0] Step 4/8: LLM available, analyzing {len(issues)} issues...")
+                    logger.info(f"[PIPELINE v2.0] Step 6/10: LLM available, analyzing {len(issues)} issues...")
                     recommendations = await analyze_seo_issues(llm, url, issues)
                     audit_data["recommendations"] = recommendations
-                    logger.info(f"[PIPELINE v2.0] Step 4/8: Complete in {time.time() - step_start:.2f}s - got AI recommendations")
+                    logger.info(f"[PIPELINE v2.0] Step 6/10: Complete in {time.time() - step_start:.2f}s - got AI recommendations")
                 else:
-                    logger.warning("[PIPELINE v2.0] Step 4/8: LLM not available, skipping AI analysis")
+                    logger.warning("[PIPELINE v2.0] Step 6/10: LLM not available, skipping AI analysis")
             except Exception as e:
-                logger.warning(f"[PIPELINE v2.0] Step 4/8: AI analysis failed (non-critical) - {type(e).__name__}: {e}")
-            
-            # Step 5: Generate SEO Plan
+                logger.warning(f"[PIPELINE v2.0] Step 6/10: AI analysis failed (non-critical) - {type(e).__name__}: {e}")
+
+            # Step 7: Generate SEO Plan with templates and keywords
             step_start = time.time()
-            logger.info("[PIPELINE v2.0] Step 5/8: Generating SEO plan...")
+            logger.info("[PIPELINE v2.0] Step 7/10: Generating SEO plan...")
             plan_data = await _generate_plan(
                 url=url,
                 audit_data=audit_data,
                 seed_keywords=seed_keywords,
                 plan_duration_weeks=plan_duration_weeks,
+                template_data=template_data,
+                keyword_data=keyword_data,
             )
             action_items = len(plan_data.get("action_plan", []))
             content_items = len(plan_data.get("content_calendar", []))
-            logger.info(f"[PIPELINE v2.0] Step 5/8: Complete in {time.time() - step_start:.2f}s - {action_items} action items, {content_items} content items")
-            
-            # Step 6: Generate Content Briefs (optional)
+            logger.info(f"[PIPELINE v2.0] Step 7/10: Complete in {time.time() - step_start:.2f}s - {action_items} action items, {content_items} content items")
+
+            # Step 8: Generate Content Briefs (optional)
             step_start = time.time()
             briefs_data: list[dict[str, Any]] = []
             if generate_briefs and plan_data.get("content_calendar"):
-                logger.info(f"[PIPELINE v2.0] Step 6/8: Generating content briefs for {content_items} items...")
+                logger.info(f"[PIPELINE v2.0] Step 8/10: Generating content briefs for {content_items} items...")
                 briefs_data = await _generate_briefs(
                     plan_data.get("content_calendar", []),
                     plan_data.get("keyword_clusters", []),
                 )
-                logger.info(f"[PIPELINE v2.0] Step 6/8: Complete in {time.time() - step_start:.2f}s - {len(briefs_data)} briefs generated")
+                logger.info(f"[PIPELINE v2.0] Step 8/10: Complete in {time.time() - step_start:.2f}s - {len(briefs_data)} briefs generated")
             else:
-                logger.info(f"[PIPELINE v2.0] Step 6/8: Skipped (generate_briefs={generate_briefs}, content_items={content_items})")
-            
-            # Step 7: Generate Markdown Reports
+                logger.info(f"[PIPELINE v2.0] Step 8/10: Skipped (generate_briefs={generate_briefs}, content_items={content_items})")
+
+            # Step 9: Generate Markdown Reports
             step_start = time.time()
-            logger.info("[PIPELINE v2.0] Step 7/8: Generating markdown reports...")
+            logger.info("[PIPELINE v2.0] Step 9/10: Generating markdown reports...")
             reports = generate_full_report_package(
                 site_url=url,
                 audit_data=audit_data,
                 plan_data=plan_data,
                 briefs_data=briefs_data,
+                template_data=template_data,
+                keyword_data=keyword_data,
             )
             report_keys = list(reports.keys())
-            logger.info(f"[PIPELINE v2.0] Step 7/8: Complete in {time.time() - step_start:.2f}s - reports: {report_keys}")
-            
-            # Step 8: Upload to Storage and Save to DB
+            logger.info(f"[PIPELINE v2.0] Step 9/10: Complete in {time.time() - step_start:.2f}s - reports: {report_keys}")
+
+            # Step 10: Upload to Storage and Save to DB
             step_start = time.time()
-            logger.info("[PIPELINE v2.0] Step 8/8: Uploading reports and saving to database...")
+            logger.info("[PIPELINE v2.0] Step 10/10: Uploading reports and saving to database...")
             file_urls = await _upload_reports(
                 tenant_id=tenant_id_str,
                 site_id=site_id_str,
                 report_id=report_id,
                 reports=reports,
             )
-            
+
             # Save audit to database with individual checks
             await _save_audit_to_db(
                 session=session,
@@ -241,23 +315,28 @@ async def _run_full_seo_pipeline(
                 audit_results=audit_results,
                 report_id=report_id,
             )
-            
+
             await session.commit()
-            logger.info(f"[PIPELINE v2.0] Step 8/8: Complete in {time.time() - step_start:.2f}s - {len(file_urls)} files uploaded")
-            
+            logger.info(f"[PIPELINE v2.0] Step 10/10: Complete in {time.time() - step_start:.2f}s - {len(file_urls)} files uploaded")
+
             completed_at = datetime.utcnow()
             duration_seconds = (completed_at - started_at).total_seconds()
-            
+
             result.update({
                 "status": "completed",
                 "completed_at": completed_at.isoformat(),
                 "duration_seconds": duration_seconds,
                 "files": file_urls,
+                "templates": template_data,
+                "keywords": keyword_data.get("keywords", [])[:20],  # Include top 20 keywords in response
                 "summary": {
                     "score": score,
                     "pages_crawled": len(pages),
+                    "sitemap_urls": sitemap_info.get("url_count", 0),
                     "checks_run": len(audit_results),
                     "issues_found": len(issues),
+                    "templates_identified": len(template_data.get("templates", [])),
+                    "keywords_found": len(keyword_data.get("keywords", [])),
                     "action_items": action_items,
                     "content_pieces_planned": content_items,
                     "briefs_generated": len(briefs_data),
@@ -366,9 +445,15 @@ async def _generate_plan(
     audit_data: dict[str, Any],
     seed_keywords: list[str],
     plan_duration_weeks: int,
+    template_data: dict[str, Any] | None = None,
+    keyword_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Generate SEO improvement plan."""
-    
+    """Generate SEO improvement plan using templates and keyword research."""
+
+    template_data = template_data or {}
+    keyword_data = keyword_data or {}
+    keywords_found = keyword_data.get("keywords", [])
+
     # Use the plan workflow
     try:
         result = await run_plan_workflow(
@@ -380,17 +465,19 @@ async def _generate_plan(
                 "issues": audit_data.get("issues", []),
             },
         )
-        
+
         if result.get("success"):
             return result
     except Exception:
         pass
-    
-    # Fallback: generate basic plan from audit issues
+
+    # Fallback: generate basic plan from audit issues, templates, and keywords
     issues = audit_data.get("issues", [])
+    templates = template_data.get("templates", [])
     action_plan: list[dict[str, Any]] = []
     content_calendar: list[dict[str, Any]] = []
-    
+    keyword_clusters: list[dict[str, Any]] = []
+
     # Phase 1: Quick wins (low severity issues)
     low_effort_issues = [i for i in issues if i.get("severity") in ["low", "medium"]]
     for idx, issue in enumerate(low_effort_issues[:5]):
@@ -406,7 +493,7 @@ async def _generate_plan(
             "effort": "low",
             "expected_impact": "medium",
         })
-    
+
     # Phase 2: Technical fixes (high severity issues)
     high_issues = [i for i in issues if i.get("severity") in ["high", "critical"]]
     for idx, issue in enumerate(high_issues[:5]):
@@ -422,9 +509,100 @@ async def _generate_plan(
             "effort": "medium",
             "expected_impact": "high",
         })
-    
-    # Phase 3: Content (if seed keywords provided)
-    if seed_keywords:
+
+    # Phase 2b: Template-based fixes
+    for template in templates[:5]:
+        if template.get("seo_recommendations"):
+            for rec in template.get("seo_recommendations", [])[:2]:
+                action_plan.append({
+                    "phase": 2,
+                    "phase_name": "Template Optimization",
+                    "week_start": 3,
+                    "week_end": 4,
+                    "priority": len(action_plan) + 1,
+                    "task": f"[{template.get('name', 'Template')}] {rec}",
+                    "description": f"Apply to all {template.get('page_count', 0)} pages using this template",
+                    "type": "technical",
+                    "effort": "medium",
+                    "expected_impact": "high",
+                    "template_id": template.get("template_id"),
+                    "affected_pages": template.get("page_count", 0),
+                })
+
+    # Phase 3: Content strategy based on keywords
+    # Sort keywords by search volume and difficulty
+    sorted_keywords = sorted(
+        keywords_found,
+        key=lambda k: (k.get("search_volume") or 0) / max(k.get("difficulty") or 1, 1),
+        reverse=True,
+    )
+
+    # Create keyword clusters by intent
+    intent_groups: dict[str, list] = {}
+    for kw in sorted_keywords[:30]:
+        intent = kw.get("intent") or "informational"
+        if intent not in intent_groups:
+            intent_groups[intent] = []
+        intent_groups[intent].append(kw)
+
+    for intent, kws in intent_groups.items():
+        keyword_clusters.append({
+            "name": f"{intent.title()} Keywords",
+            "intent": intent,
+            "keywords": [k.get("text") for k in kws[:10]],
+            "total_volume": sum(k.get("search_volume") or 0 for k in kws),
+        })
+
+    # Create content calendar from top keywords
+    week = 4
+    for idx, kw in enumerate(sorted_keywords[:10]):
+        kw_text = kw.get("text", "")
+        search_volume = kw.get("search_volume", 0)
+        intent = kw.get("intent", "informational")
+
+        # Determine content type based on intent
+        if intent == "transactional":
+            content_type = "Landing Page"
+        elif intent == "commercial":
+            content_type = "Comparison/Review"
+        elif intent == "navigational":
+            content_type = "Service Page"
+        else:
+            content_type = "Blog Post"
+
+        action_plan.append({
+            "phase": 3,
+            "phase_name": "Content Strategy",
+            "week_start": week,
+            "week_end": week + 2,
+            "priority": len(action_plan) + 1,
+            "task": f"Create {content_type}: {kw_text}",
+            "description": f"Target keyword with {search_volume:,} monthly searches ({intent} intent)",
+            "type": "content",
+            "effort": "high",
+            "expected_impact": "high",
+            "target_keywords": [kw_text],
+            "content_type": content_type,
+            "search_volume": search_volume,
+            "intent": intent,
+        })
+
+        content_calendar.append({
+            "week": week,
+            "publish_date": "",
+            "title": f"{content_type}: {kw_text}",
+            "content_type": content_type,
+            "target_keywords": [kw_text],
+            "search_volume": search_volume,
+            "intent": intent,
+            "status": "planned",
+        })
+
+        if idx % 2 == 1:
+            week += 1
+
+    # Fallback: use seed keywords if no DataForSEO keywords available
+    if not content_calendar and seed_keywords:
         for idx, keyword in enumerate(seed_keywords[:3]):
             week = 4 + (idx * 2)
             action_plan.append({
@@ -439,20 +617,21 @@ async def _generate_plan(
                 "effort": "high",
                 "expected_impact": "high",
                 "target_keywords": [keyword],
-                "content_type": "Blog post",
+                "content_type": "Blog Post",
             })
-            
+
             content_calendar.append({
                 "week": week,
                 "publish_date": "",
                 "title": f"Content for: {keyword}",
-                "content_type": "Blog post",
+                "content_type": "Blog Post",
                 "target_keywords": [keyword],
                 "status": "planned",
             })
-    
+
     return {
         "success": True,
+        "templates": templates,
         "summary": {
             "current_score": audit_data.get("score", 0),
             "plan_duration_weeks": plan_duration_weeks,
@@ -460,20 +639,23 @@ async def _generate_plan(
             "technical_tasks": sum(1 for a in action_plan if a["type"] == "technical"),
             "content_tasks": sum(1 for a in action_plan if a["type"] == "content"),
             "content_pieces_planned": len(content_calendar),
+            "templates_analyzed": len(templates),
+            "keywords_researched": len(keywords_found),
             "phases": [
                 {"number": 1, "name": "Quick Wins", "weeks": "1-2", "focus": "Low-effort fixes", "tasks": sum(1 for a in action_plan if a.get("phase") == 1)},
-                {"number": 2, "name": "Technical Optimization", "weeks": "2-4", "focus": "Critical fixes", "tasks": sum(1 for a in action_plan if a.get("phase") == 2)},
-                {"number": 3, "name": "Content Strategy", "weeks": f"4-{plan_duration_weeks}", "focus": "Content creation", "tasks": sum(1 for a in action_plan if a.get("phase") == 3)},
+                {"number": 2, "name": "Technical Optimization", "weeks": "2-4", "focus": "Critical fixes + template optimization", "tasks": sum(1 for a in action_plan if a.get("phase") == 2)},
+                {"number": 3, "name": "Content Strategy", "weeks": f"4-{plan_duration_weeks}", "focus": "Keyword-driven content", "tasks": sum(1 for a in action_plan if a.get("phase") == 3)},
             ],
             "expected_outcomes": [
                 f"Fix {len(issues)} technical issues",
-                f"Create {len(content_calendar)} content pieces",
+                f"Optimize {sum(t.get('page_count', 0) for t in templates)} pages across {len(templates)} templates",
+                f"Create {len(content_calendar)} content pieces targeting {sum(c.get('search_volume', 0) for c in content_calendar):,} monthly searches",
                 f"Improve SEO score from {audit_data.get('score', 0)} to 85+",
             ],
         },
         "action_plan": action_plan,
         "content_calendar": content_calendar,
-        "keyword_clusters": [],
+        "keyword_clusters": keyword_clusters,
     }
 
 
@@ -562,6 +744,18 @@ async def _upload_reports(
         storage.upload_markdown(path, reports["page_fixes"])
         file_urls["page_fixes"] = storage.get_presigned_url(path)
     
+    # Upload template analysis report
+    if "templates" in reports:
+        path = f"tenants/{tenant_id}/sites/{site_id}/reports/{report_id}/templates.md"
+        storage.upload_markdown(path, reports["templates"])
+        file_urls["templates"] = storage.get_presigned_url(path)
+
+    # Upload keyword research report
+    if "keywords" in reports:
+        path = f"tenants/{tenant_id}/sites/{site_id}/reports/{report_id}/keywords.md"
+        storage.upload_markdown(path, reports["keywords"])
+        file_urls["keywords"] = storage.get_presigned_url(path)
+
     # Upload article briefs
     if "briefs" in reports and reports["briefs"]:
         file_urls["briefs"] = []
@@ -574,7 +768,7 @@ async def _upload_reports(
                 "keyword": brief["keyword"],
                 "url": storage.get_presigned_url(path),
             })
-    
+
     # Upload metadata
     metadata = {
         "report_id": report_id,
