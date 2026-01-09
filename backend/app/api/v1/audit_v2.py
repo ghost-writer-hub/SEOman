@@ -20,7 +20,7 @@ class AuditV2Request(BaseModel):
     """Request for v2.0 audit."""
     
     url: str = Field(..., description="Website URL to audit")
-    max_pages: int = Field(default=50, ge=1, le=500, description="Maximum pages to crawl")
+    max_pages: int = Field(default=50, ge=1, le=10000, description="Maximum pages to crawl (up to 10000)")
     generate_plan: bool = Field(default=True, description="Generate SEO improvement plan")
     generate_briefs: bool = Field(default=False, description="Generate content briefs")
     seed_keywords: list[str] = Field(default_factory=list, description="Optional seed keywords")

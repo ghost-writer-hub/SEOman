@@ -80,15 +80,19 @@ class CrawledPage:
 
 @dataclass
 class CrawlConfig:
-    max_pages: int = 100
-    max_depth: int = 10
-    concurrent_requests: int = 5
-    request_delay_ms: int = 100
+    max_pages: int = 10000
+    max_depth: int = 15
+    concurrent_requests: int = 3
+    request_delay_ms: int = 500
     timeout_seconds: int = 30
     respect_robots_txt: bool = True
     follow_external_links: bool = False
     store_html: bool = True
-    user_agent: str = "SEOmanBot/2.0 (+https://seoman.ai/bot)"
+    user_agent: str = "SEOmanBot/2.0 (+https://seoman.ai/bot; respectful crawler)"
+    adaptive_delay: bool = True
+    min_delay_ms: int = 200
+    max_delay_ms: int = 2000
+    backoff_multiplier: float = 1.5
 
 
 class SEOmanCrawler:
@@ -102,8 +106,10 @@ class SEOmanCrawler:
         site_id: str = "",
         crawl_id: str = "",
     ):
-        self.base_url = site_url.rstrip("/")
+        self.original_url = site_url.rstrip("/")
+        self.base_url = self.original_url
         self.domain = urlparse(self.base_url).netloc
+        self.allowed_domains: set[str] = set()
         self.config = config or CrawlConfig()
         self.tenant_id = tenant_id
         self.site_id = site_id
@@ -115,6 +121,11 @@ class SEOmanCrawler:
         self.robots_parser: RobotFileParser | None = None
         self.semaphore: asyncio.Semaphore = asyncio.Semaphore(self.config.concurrent_requests)
 
+        # Adaptive rate limiting state
+        self._current_delay_ms: float = float(self.config.request_delay_ms)
+        self._consecutive_errors: int = 0
+        self._robots_crawl_delay: float | None = None
+
         self.storage = None
         if self.config.store_html and tenant_id and site_id and crawl_id:
             try:
@@ -122,15 +133,37 @@ class SEOmanCrawler:
             except Exception as e:
                 logger.warning(f"Could not initialize storage: {e}")
 
-    async def crawl(self) -> list[CrawledPage]:
-        """Run the crawl and return results."""
+    async def crawl(self, seed_urls: list[str] | None = None) -> list[CrawledPage]:
+        """Run the crawl and return results.
+        
+        Args:
+            seed_urls: Optional list of URLs from sitemap to seed the queue.
+        """
         logger.info(f"Starting crawl of {self.base_url} (max {self.config.max_pages} pages)")
         start_time = time.time()
+
+        resolved_url = await self._resolve_start_url()
+        if resolved_url:
+            self.base_url = resolved_url.rstrip("/")
+            self.domain = urlparse(self.base_url).netloc
+            logger.info(f"Resolved start URL to: {self.base_url}")
+
+        self._setup_allowed_domains()
 
         if self.config.respect_robots_txt:
             await self._fetch_robots_txt()
 
         await self.url_queue.put((self.base_url, 0))
+
+        if seed_urls:
+            urls_added = 0
+            for url in seed_urls:
+                if urls_added >= self.config.max_pages:
+                    break
+                if self._is_internal_domain(urlparse(url).netloc):
+                    await self.url_queue.put((url, 1))
+                    urls_added += 1
+            logger.info(f"Seeded queue with {urls_added} URLs from sitemap")
 
         workers = [
             asyncio.create_task(self._worker(f"worker-{i}"))
@@ -146,8 +179,61 @@ class SEOmanCrawler:
         logger.info(f"Crawl complete: {len(self.results)} pages in {elapsed:.2f}s")
         return self.results
 
+    async def _resolve_start_url(self) -> str | None:
+        """Try to resolve the start URL, attempting www/non-www variants if needed."""
+        urls_to_try = [self.base_url]
+        parsed = urlparse(self.base_url)
+
+        if parsed.netloc.startswith("www."):
+            urls_to_try.append(f"{parsed.scheme}://{parsed.netloc[4:]}{parsed.path}")
+        else:
+            urls_to_try.append(f"{parsed.scheme}://www.{parsed.netloc}{parsed.path}")
+
+        async with httpx.AsyncClient(
+            timeout=15,
+            follow_redirects=True,
+            headers={"User-Agent": self.config.user_agent},
+        ) as client:
+            for url in urls_to_try:
+                try:
+                    logger.debug(f"Trying URL: {url}")
+                    response = await client.head(url)
+                    final_url = str(response.url).rstrip("/")
+                    logger.info(f"Successfully resolved {url} -> {final_url}")
+                    return final_url
+                except httpx.ConnectError as e:
+                    logger.debug(f"Connect error for {url}: {e}")
+                    continue
+                except Exception as e:
+                    logger.debug(f"Error trying {url}: {e}")
+                    continue
+
+        logger.warning(f"Could not resolve any URL variant for {self.base_url}")
+        return None
+
+    def _setup_allowed_domains(self):
+        """Setup allowed domains for internal link detection."""
+        base_domain = self.domain.replace("www.", "")
+        self.allowed_domains = {
+            base_domain,
+            f"www.{base_domain}",
+            self.domain,
+        }
+        logger.debug(f"Allowed domains: {self.allowed_domains}")
+
+    def _is_internal_domain(self, netloc: str) -> bool:
+        """Check if a domain is internal (belongs to the site being crawled)."""
+        if not netloc:
+            return False
+        if netloc in self.allowed_domains:
+            return True
+        base_domain = self.domain.replace("www.", "")
+        if netloc.endswith(f".{base_domain}"):
+            return True
+        return False
+
     async def _worker(self, name: str):
-        """Worker that processes URLs from the queue."""
+        """Worker that processes URLs from the queue with adaptive rate limiting."""
         while True:
             try:
                 url, depth = await asyncio.wait_for(self.url_queue.get(), timeout=5.0)
@@ -165,11 +251,11 @@ class SEOmanCrawler:
                     continue
 
                 self.visited_urls.add(url)
-                await self._crawl_url(url, depth)
+                success = await self._crawl_url(url, depth)
                 self.url_queue.task_done()
 
-                if self.config.request_delay_ms > 0:
-                    await asyncio.sleep(self.config.request_delay_ms / 1000)
+                # Adaptive delay logic
+                await self._apply_adaptive_delay(success)
 
             except asyncio.TimeoutError:
                 continue
@@ -182,11 +268,46 @@ class SEOmanCrawler:
                 except ValueError:
                     pass
 
-    async def _crawl_url(self, url: str, depth: int):
-        """Crawl a single URL."""
+    async def _apply_adaptive_delay(self, success: bool):
+        """Apply delay between requests with adaptive backoff."""
+        if self.config.adaptive_delay:
+            if success:
+                # Successful request: gradually reduce delay (but not below minimum)
+                self._consecutive_errors = 0
+                new_delay = max(
+                    self.config.min_delay_ms,
+                    self._current_delay_ms / self.config.backoff_multiplier
+                )
+                if new_delay != self._current_delay_ms:
+                    self._current_delay_ms = new_delay
+            else:
+                # Failed request: exponential backoff
+                self._consecutive_errors += 1
+                new_delay = min(
+                    self.config.max_delay_ms,
+                    self._current_delay_ms * (self.config.backoff_multiplier ** self._consecutive_errors)
+                )
+                if new_delay != self._current_delay_ms:
+                    logger.info(f"Backing off: delay increased to {new_delay:.0f}ms (consecutive errors: {self._consecutive_errors})")
+                    self._current_delay_ms = new_delay
+
+        # Use robots.txt crawl-delay if specified and higher
+        effective_delay = self._current_delay_ms
+        if self._robots_crawl_delay is not None:
+            effective_delay = max(effective_delay, self._robots_crawl_delay * 1000)
+
+        if effective_delay > 0:
+            await asyncio.sleep(effective_delay / 1000)
+
+    async def _crawl_url(self, url: str, depth: int) -> bool:
+        """Crawl a single URL.
+        
+        Returns:
+            True if request succeeded (2xx/3xx), False if error or rate-limited.
+        """
         if self.robots_parser and not self.robots_parser.can_fetch(self.config.user_agent, url):
             logger.debug(f"Blocked by robots.txt: {url}")
-            return
+            return True  # Not an error, just blocked
 
         async with self.semaphore:
             try:
@@ -199,10 +320,21 @@ class SEOmanCrawler:
                     response = await client.get(url)
                     load_time_ms = int((time.time() - start_time) * 1000)
 
+                    # Check for rate limiting responses
+                    if response.status_code in (429, 503):
+                        logger.warning(f"Rate limited ({response.status_code}): {url}")
+                        self.results.append(CrawledPage(
+                            url=url, final_url=url, status_code=response.status_code,
+                            content_type="", load_time_ms=load_time_ms,
+                            crawl_timestamp=datetime.utcnow().isoformat(),
+                            crawl_depth=depth, errors=[f"Rate limited: {response.status_code}"],
+                        ))
+                        return False  # Trigger backoff
+
                     content_type = response.headers.get("content-type", "")
                     if "text/html" not in content_type.lower():
                         logger.debug(f"Skipping non-HTML: {url} ({content_type})")
-                        return
+                        return True  # Not an error
 
                     html = response.text
                     page = self._extract_page_data(url, str(response.url), response.status_code, html, load_time_ms, depth, dict(response.headers))
@@ -217,6 +349,8 @@ class SEOmanCrawler:
                         if link_url and link_url not in self.visited_urls:
                             await self.url_queue.put((link_url, depth + 1))
 
+                    return True  # Success
+
             except httpx.TimeoutException:
                 logger.warning(f"Timeout: {url}")
                 self.results.append(CrawledPage(
@@ -225,6 +359,7 @@ class SEOmanCrawler:
                     crawl_timestamp=datetime.utcnow().isoformat(),
                     crawl_depth=depth, errors=["Request timed out"],
                 ))
+                return False  # Trigger backoff
             except Exception as e:
                 logger.error(f"Error crawling {url}: {e}")
                 self.results.append(CrawledPage(
@@ -233,6 +368,7 @@ class SEOmanCrawler:
                     crawl_timestamp=datetime.utcnow().isoformat(),
                     crawl_depth=depth, errors=[str(e)],
                 ))
+                return False  # Trigger backoff
 
     def _extract_page_data(
         self,
@@ -290,7 +426,7 @@ class SEOmanCrawler:
                 "nofollow": "nofollow" in a.get("rel", []),
             }
 
-            if parsed.netloc == self.domain or parsed.netloc.endswith(f".{self.domain}"):
+            if self._is_internal_domain(parsed.netloc):
                 internal_links.append(link_data)
             else:
                 external_links.append(link_data)
@@ -407,17 +543,66 @@ class SEOmanCrawler:
             logger.error(f"Failed to store HTML for {page.url}: {e}")
 
     async def _fetch_robots_txt(self):
-        """Fetch and parse robots.txt."""
+        """Fetch and parse robots.txt, including crawl-delay directive."""
         robots_url = f"{self.base_url}/robots.txt"
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 response = await client.get(robots_url)
                 if response.status_code == 200:
+                    robots_content = response.text
                     self.robots_parser = RobotFileParser()
-                    self.robots_parser.parse(response.text.splitlines())
+                    self.robots_parser.parse(robots_content.splitlines())
                     logger.info(f"Loaded robots.txt from {robots_url}")
+
+                    # Extract Crawl-delay directive
+                    self._robots_crawl_delay = self._extract_crawl_delay(robots_content)
+                    if self._robots_crawl_delay:
+                        logger.info(f"Robots.txt crawl-delay: {self._robots_crawl_delay}s")
         except Exception as e:
             logger.warning(f"Could not fetch robots.txt: {e}")
+
+    def _extract_crawl_delay(self, robots_content: str) -> float | None:
+        """Extract crawl-delay from robots.txt content."""
+        current_agent = None
+        crawl_delay = None
+        wildcard_delay = None
+
+        for line in robots_content.splitlines():
+            line = line.strip().lower()
+            if line.startswith("user-agent:"):
+                current_agent = line.split(":", 1)[1].strip()
+            elif line.startswith("crawl-delay:") and current_agent:
+                try:
+                    delay = float(line.split(":", 1)[1].strip())
+                    if current_agent == "*":
+                        wildcard_delay = delay
+                    elif "seoman" in self.config.user_agent.lower() or current_agent == "*":
+                        crawl_delay = delay
+                except ValueError:
+                    pass
+
+        return crawl_delay or wildcard_delay
+
+
+async def resolve_site_url(site_url: str) -> str:
+    """Resolve site URL, trying www/non-www variants if needed."""
+    urls_to_try = [site_url.rstrip("/")]
+    parsed = urlparse(site_url)
+
+    if parsed.netloc.startswith("www."):
+        urls_to_try.append(f"{parsed.scheme}://{parsed.netloc[4:]}")
+    else:
+        urls_to_try.append(f"{parsed.scheme}://www.{parsed.netloc}")
+
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        for url in urls_to_try:
+            try:
+                response = await client.head(url)
+                return str(response.url).rstrip("/")
+            except Exception:
+                continue
+
+    return site_url.rstrip("/")
 
 
 async def crawl_site(
@@ -433,19 +618,26 @@ async def crawl_site(
     """
     from app.services.audit_engine import fetch_robots_txt, fetch_sitemap
 
-    robots_info = await fetch_robots_txt(site_url)
-    sitemap_info = await fetch_sitemap(site_url, robots_info.get("content"))
+    resolved_url = await resolve_site_url(site_url)
+    logger.info(f"Resolved site URL: {site_url} -> {resolved_url}")
+
+    robots_info = await fetch_robots_txt(resolved_url)
+    sitemap_info = await fetch_sitemap(resolved_url, robots_info.get("content"))
+
+    sitemap_urls = sitemap_info.get("urls", [])
+    if sitemap_urls:
+        logger.info(f"Found {len(sitemap_urls)} URLs in sitemap, will use to seed crawler")
 
     config = CrawlConfig(max_pages=max_pages, store_html=bool(tenant_id))
     crawler = SEOmanCrawler(
-        site_url=site_url,
+        site_url=resolved_url,
         config=config,
         tenant_id=tenant_id,
         site_id=site_id,
         crawl_id=crawl_id,
     )
 
-    pages = await crawler.crawl()
+    pages = await crawler.crawl(seed_urls=sitemap_urls)
 
     return pages, robots_info, sitemap_info
 

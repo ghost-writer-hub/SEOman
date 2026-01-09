@@ -1584,7 +1584,7 @@ async def fetch_robots_txt(base_url: str) -> dict:
 
 
 async def fetch_sitemap(base_url: str, robots_content: str | None = None) -> dict:
-    """Fetch and parse sitemap.xml."""
+    """Fetch and parse sitemap.xml, extracting all URLs."""
     sitemap_urls = [f"{base_url.rstrip('/')}/sitemap.xml"]
 
     if robots_content:
@@ -1592,20 +1592,58 @@ async def fetch_sitemap(base_url: str, robots_content: str | None = None) -> dic
             if line.lower().startswith("sitemap:"):
                 sitemap_urls.append(line.split(":", 1)[1].strip())
 
+    all_page_urls: list[str] = []
+
+    async def fetch_and_parse_sitemap(url: str, depth: int = 0) -> list[str]:
+        """Recursively fetch sitemap and extract URLs."""
+        if depth > 3:
+            return []
+
+        urls: list[str] = []
+        try:
+            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+                response = await client.get(url)
+                if response.status_code != 200:
+                    return []
+
+                content = response.text
+                soup = BeautifulSoup(content, "lxml-xml")
+
+                for loc in soup.find_all("loc"):
+                    loc_url = loc.get_text(strip=True)
+                    if loc_url:
+                        if loc_url.endswith(".xml") or "sitemap" in loc_url.lower():
+                            nested_urls = await fetch_and_parse_sitemap(loc_url, depth + 1)
+                            urls.extend(nested_urls)
+                        else:
+                            urls.append(loc_url)
+
+        except Exception as e:
+            logger.debug(f"Error fetching sitemap {url}: {e}")
+
+        return urls
+
     for sitemap_url in sitemap_urls:
         try:
-            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
                 response = await client.get(sitemap_url)
-                if response.status_code == 200 and "xml" in response.headers.get("content-type", ""):
-                    return {
-                        "exists": True,
-                        "url": sitemap_url,
-                        "content": response.text[:10000],
-                    }
+                if response.status_code == 200:
+                    content_type = response.headers.get("content-type", "")
+                    if "xml" in content_type or response.text.strip().startswith("<?xml"):
+                        page_urls = await fetch_and_parse_sitemap(sitemap_url)
+                        all_page_urls.extend(page_urls)
+
+                        logger.info(f"Sitemap {sitemap_url}: found {len(page_urls)} URLs")
+                        return {
+                            "exists": True,
+                            "url": sitemap_url,
+                            "urls": all_page_urls,
+                            "url_count": len(all_page_urls),
+                        }
         except Exception:
             continue
 
-    return {"exists": False}
+    return {"exists": False, "urls": []}
 
 
 def create_crawl_data_from_pages(base_url: str, pages: list[dict], robots: dict | None = None, sitemap: dict | None = None) -> CrawlData:
