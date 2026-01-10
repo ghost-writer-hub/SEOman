@@ -84,6 +84,7 @@ async def init_db() -> None:
     from app.models.keyword import Keyword, KeywordCluster
     from app.models.plan import SeoPlan, SeoTask
     from app.models.content import ContentBrief, ContentDraft
-    
+    from app.models.usage import TenantUsage, TenantQuota, RateLimitEvent
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

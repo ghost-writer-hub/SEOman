@@ -96,9 +96,15 @@ class CrawlPage(Base, BaseModel):
     scripts_count = Column(Integer, nullable=True)
     stylesheets_count = Column(Integer, nullable=True)
     text_content_hash = Column(String(64), nullable=True)
-    
+
+    # JS rendering fields
+    js_rendered = Column(Boolean, default=False)
+    js_render_time_ms = Column(Integer, nullable=True)
+    spa_detected = Column(Boolean, default=False)
+    framework_detected = Column(String(50), nullable=True)
+
     # Relationships
     crawl_job = relationship("CrawlJob", back_populates="pages")
-    
+
     def __repr__(self) -> str:
         return f"<CrawlPage {self.url[:50]}... ({self.status_code})>"

@@ -488,18 +488,30 @@ class MarkdownGenerator:
                 title = issue.get("title", "Unknown Issue")
                 severity = issue.get("severity", "low").capitalize()
                 suggested_fix = issue.get("suggested_fix", issue.get("recommendation", ""))
-                
+                details = issue.get("details", {})
+
                 lines.extend([
                     f"#### [{severity}] {title}",
                     f"",
                 ])
-                
+
+                # Show specific before/after values if available for this page
+                page_details = details.get("pages", {}).get(url, {})
+                if page_details:
+                    current = page_details.get("current")
+                    target = page_details.get("target")
+                    if current and target:
+                        lines.extend([
+                            f"**Current:** {current} | **Target:** {target}",
+                            f"",
+                        ])
+
                 if suggested_fix:
                     lines.extend([
                         f"**Fix:** {suggested_fix}",
                         f"",
                     ])
-            
+
             lines.append("")
         
         lines.extend([
@@ -520,18 +532,18 @@ class MarkdownGenerator:
     ) -> str:
         """
         Generate an article content brief in markdown format.
-        
+
         Args:
             keyword: Target keyword for the article
             brief_data: Brief data including outline, suggestions, etc.
             brief_number: Brief sequence number
             generated_at: Report generation timestamp
-        
+
         Returns:
             Markdown formatted article brief
         """
         generated_at = generated_at or datetime.utcnow()
-        
+
         title_suggestions = brief_data.get("title_suggestions", [f"Article about {keyword}"])
         meta_description = brief_data.get("meta_description", "")
         target_word_count = brief_data.get("target_word_count", 1500)
@@ -539,12 +551,22 @@ class MarkdownGenerator:
         keywords_to_include = brief_data.get("keywords_to_include", [keyword])
         differentiation_angle = brief_data.get("differentiation_angle", "")
         search_intent = brief_data.get("intent", "informational")
-        
+        content_type = brief_data.get("content_type", "Blog Post")
+        search_volume = brief_data.get("search_volume", 0)
+        cta_suggestions = brief_data.get("cta_suggestions", [])
+
         lines = [
-            f"# Article Brief #{brief_number:02d}",
+            f"# Content Brief #{brief_number:02d}",
             f"",
             f"**Target Keyword:** {keyword}  ",
+            f"**Content Type:** {content_type}  ",
             f"**Search Intent:** {search_intent.capitalize()}  ",
+        ]
+
+        if search_volume:
+            lines.append(f"**Monthly Search Volume:** {search_volume:,}  ")
+
+        lines.extend([
             f"**Target Word Count:** {target_word_count} words  ",
             f"**Generated:** {generated_at.strftime('%Y-%m-%d %H:%M UTC')}",
             f"",
@@ -552,7 +574,7 @@ class MarkdownGenerator:
             f"",
             f"## Title Suggestions",
             f"",
-        ]
+        ])
         
         for idx, title in enumerate(title_suggestions[:5], 1):
             lines.append(f"{idx}. {title}")
@@ -622,25 +644,63 @@ class MarkdownGenerator:
         for kw in keywords_to_include[:15]:
             lines.append(f"- {kw}")
         
+        # Add CTA suggestions if available
+        if cta_suggestions:
+            lines.extend([
+                f"",
+                f"---",
+                f"",
+                f"## Call-to-Action Suggestions",
+                f"",
+            ])
+            for cta in cta_suggestions:
+                lines.append(f"- {cta}")
+
+        # Writing guidelines based on intent
         lines.extend([
             f"",
             f"---",
             f"",
             f"## Writing Guidelines",
             f"",
-            f"- Write for humans first, search engines second",
-            f"- Use the target keyword naturally in the first 100 words",
-            f"- Include the keyword in at least one H2 heading",
-            f"- Use related keywords throughout the content",
-            f"- Break up text with subheadings every 300-400 words",
-            f"- Include internal links to related content",
-            f"- Add external links to authoritative sources",
+        ])
+
+        if search_intent == "transactional":
+            lines.extend([
+                f"- Lead with value proposition and key benefits",
+                f"- Include clear, prominent CTAs above the fold",
+                f"- Add trust signals (reviews, guarantees, certifications)",
+                f"- Create urgency with time-sensitive offers where appropriate",
+                f"- Make the booking/purchase process crystal clear",
+                f"- Include pricing information or 'starting from' rates",
+            ])
+        elif search_intent == "commercial":
+            lines.extend([
+                f"- Be objective and thorough in comparisons",
+                f"- Include comparison tables for easy scanning",
+                f"- List clear pros and cons for each option",
+                f"- Provide specific recommendations based on user needs",
+                f"- Include real examples and case studies where possible",
+                f"- End with actionable next steps for the reader",
+            ])
+        else:  # informational or navigational
+            lines.extend([
+                f"- Write for humans first, search engines second",
+                f"- Use the target keyword naturally in the first 100 words",
+                f"- Include the keyword in at least one H2 heading",
+                f"- Use related keywords throughout the content",
+                f"- Break up text with subheadings every 300-400 words",
+                f"- Include internal links to related content",
+                f"- Add external links to authoritative sources",
+            ])
+
+        lines.extend([
             f"",
             f"---",
             f"",
             f"*Brief generated by SEOman*",
         ])
-        
+
         return "\n".join(lines)
 
 

@@ -67,6 +67,33 @@ class Settings(BaseSettings):
     
     MAX_PAGES_PER_CRAWL: int = 20000
     MAX_KEYWORD_QUERIES_PER_MONTH: int = 1000
+
+    # Rate Limiting Configuration
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_DEFAULT_PER_MINUTE: int = 60
+    RATE_LIMIT_BURST_MULTIPLIER: float = 1.5
+
+    # Default Plan Quotas (monthly)
+    QUOTA_FREE_API_CALLS: int = 1000
+    QUOTA_FREE_CRAWL_PAGES: int = 5000
+    QUOTA_FREE_KEYWORD_LOOKUPS: int = 100
+    QUOTA_FREE_AUDITS: int = 10
+    QUOTA_FREE_CONTENT_GENERATIONS: int = 20
+    QUOTA_FREE_JS_RENDERS: int = 500
+
+    QUOTA_PRO_API_CALLS: int = 50000
+    QUOTA_PRO_CRAWL_PAGES: int = 100000
+    QUOTA_PRO_KEYWORD_LOOKUPS: int = 5000
+    QUOTA_PRO_AUDITS: int = 100
+    QUOTA_PRO_CONTENT_GENERATIONS: int = 500
+    QUOTA_PRO_JS_RENDERS: int = 10000
+
+    QUOTA_ENTERPRISE_API_CALLS: int = 0  # 0 = unlimited
+    QUOTA_ENTERPRISE_CRAWL_PAGES: int = 0
+    QUOTA_ENTERPRISE_KEYWORD_LOOKUPS: int = 0
+    QUOTA_ENTERPRISE_AUDITS: int = 0
+    QUOTA_ENTERPRISE_CONTENT_GENERATIONS: int = 0
+    QUOTA_ENTERPRISE_JS_RENDERS: int = 0
     
     # Quick SEO Analyzer Configuration
     PYTHON_SEOANALYZER_URL: str = os.getenv("PYTHON_SEOANALYZER_URL", "http://quick-analyzer:8080")

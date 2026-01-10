@@ -454,22 +454,24 @@ async def _generate_plan(
     keyword_data = keyword_data or {}
     keywords_found = keyword_data.get("keywords", [])
 
-    # Use the plan workflow
-    try:
-        result = await run_plan_workflow(
-            url=url,
-            seed_keywords=seed_keywords or ["seo", "optimization"],
-            plan_duration_weeks=plan_duration_weeks,
-            provided_audit={
-                "score": audit_data.get("score", 0),
-                "issues": audit_data.get("issues", []),
-            },
-        )
+    # Use the plan workflow only if we don't have keyword research data
+    # (the workflow doesn't use keyword_data, so skip it when we have keywords)
+    if not keywords_found:
+        try:
+            result = await run_plan_workflow(
+                url=url,
+                seed_keywords=seed_keywords or ["seo", "optimization"],
+                plan_duration_weeks=plan_duration_weeks,
+                provided_audit={
+                    "score": audit_data.get("score", 0),
+                    "issues": audit_data.get("issues", []),
+                },
+            )
 
-        if result.get("success"):
-            return result
-    except Exception:
-        pass
+            if result.get("success"):
+                return result
+        except Exception:
+            pass
 
     # Fallback: generate basic plan from audit issues, templates, and keywords
     issues = audit_data.get("issues", [])
@@ -664,9 +666,9 @@ async def _generate_briefs(
     keyword_clusters: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Generate content briefs for planned content."""
-    
+
     briefs: list[dict[str, Any]] = []
-    
+
     # Try to use LLM for brief generation
     llm = None
     try:
@@ -675,44 +677,147 @@ async def _generate_briefs(
             llm = None
     except Exception:
         pass
-    
+
     for item in content_calendar[:5]:  # Limit to 5 briefs
         keywords = item.get("target_keywords", [])
         main_keyword = keywords[0] if keywords else item.get("title", "topic")
-        
+        intent = item.get("intent", "informational")
+        content_type = item.get("content_type", "Blog Post")
+        search_volume = item.get("search_volume", 0)
+
         if llm:
             try:
                 from app.integrations.llm import generate_content_brief
                 brief_data = await generate_content_brief(llm, main_keyword, [])
                 brief_data["keyword"] = main_keyword
-                brief_data["intent"] = "informational"
+                brief_data["intent"] = intent
                 briefs.append(brief_data)
                 continue
             except Exception:
                 pass
-        
-        # Fallback: basic brief
-        briefs.append({
-            "keyword": main_keyword,
-            "intent": "informational",
+
+        # Generate intent-specific brief
+        brief = _generate_intent_based_brief(
+            main_keyword, intent, content_type, search_volume, keywords
+        )
+        briefs.append(brief)
+
+    return briefs
+
+
+def _generate_intent_based_brief(
+    keyword: str,
+    intent: str,
+    content_type: str,
+    search_volume: int,
+    related_keywords: list[str],
+) -> dict[str, Any]:
+    """Generate a content brief tailored to the search intent."""
+
+    keyword_title = keyword.title()
+
+    # Intent-specific templates
+    if intent == "transactional":
+        return {
+            "keyword": keyword,
+            "intent": intent,
+            "content_type": content_type,
+            "search_volume": search_volume,
             "title_suggestions": [
-                f"Complete Guide to {main_keyword.title()}",
-                f"How to Master {main_keyword.title()}",
-                f"{main_keyword.title()}: Everything You Need to Know",
+                f"Book {keyword_title} - Best Rates & Availability",
+                f"{keyword_title} | Official Reservations",
+                f"Reserve {keyword_title} - Exclusive Offers Available",
             ],
-            "meta_description": f"Learn everything about {main_keyword}. Comprehensive guide with tips, examples, and best practices.",
+            "meta_description": f"Book {keyword} with best price guarantee. Check availability, compare rates, and secure your reservation today. Special offers available.",
+            "target_word_count": 800,
+            "content_outline": [
+                {"heading": "Overview", "key_points": ["Location highlights", "Key features & amenities", "Star rating & reviews"]},
+                {"heading": "Room Types & Rates", "key_points": ["Room categories", "Price comparison", "What's included"]},
+                {"heading": "Booking Information", "key_points": ["How to book", "Cancellation policy", "Payment options"]},
+                {"heading": "Special Offers", "key_points": ["Current promotions", "Seasonal deals", "Package deals"]},
+                {"heading": "Guest Reviews", "key_points": ["Recent testimonials", "Rating summary", "What guests love"]},
+            ],
+            "keywords_to_include": list(set(related_keywords + [keyword, "book", "reserve", "rates", "availability"])),
+            "differentiation_angle": "Focus on trust signals (reviews, guarantees), clear CTAs, and urgency elements.",
+            "cta_suggestions": ["Book Now", "Check Availability", "Get Best Price"],
+        }
+
+    elif intent == "commercial":
+        return {
+            "keyword": keyword,
+            "intent": intent,
+            "content_type": content_type,
+            "search_volume": search_volume,
+            "title_suggestions": [
+                f"Best {keyword_title} - Expert Reviews & Comparison",
+                f"Top {keyword_title} Ranked for 2025",
+                f"{keyword_title} Guide: Which One Is Right for You?",
+            ],
+            "meta_description": f"Compare the best {keyword} options with our expert guide. Detailed reviews, pros & cons, and recommendations to help you choose.",
+            "target_word_count": 2000,
+            "content_outline": [
+                {"heading": "Introduction", "key_points": ["Why this comparison matters", "Selection criteria", "How we evaluated"]},
+                {"heading": "Quick Comparison Table", "key_points": ["Side-by-side features", "Price ranges", "Our ratings"]},
+                {"heading": "Detailed Reviews", "key_points": ["Option 1 deep-dive", "Option 2 deep-dive", "Option 3 deep-dive"]},
+                {"heading": "Pros and Cons", "key_points": ["Strengths of each", "Weaknesses to consider", "Best for whom"]},
+                {"heading": "How to Choose", "key_points": ["Key factors to consider", "Budget considerations", "Specific needs matching"]},
+                {"heading": "Our Recommendation", "key_points": ["Best overall", "Best value", "Best premium option"]},
+            ],
+            "keywords_to_include": list(set(related_keywords + [keyword, "best", "review", "compare", "top", "vs"])),
+            "differentiation_angle": "Provide genuine comparisons with real pros/cons. Include comparison tables and clear recommendations.",
+            "cta_suggestions": ["See Full Details", "Compare Prices", "Read Full Review"],
+        }
+
+    elif intent == "navigational":
+        return {
+            "keyword": keyword,
+            "intent": intent,
+            "content_type": content_type,
+            "search_volume": search_volume,
+            "title_suggestions": [
+                f"{keyword_title} - Official Information",
+                f"About {keyword_title} | Location, Contact & Details",
+                f"{keyword_title} - Everything You Need to Know",
+            ],
+            "meta_description": f"Official information about {keyword}. Find location details, contact information, hours, and everything you need to plan your visit.",
+            "target_word_count": 1000,
+            "content_outline": [
+                {"heading": "About", "key_points": ["What it is", "History/background", "What makes it special"]},
+                {"heading": "Location & Access", "key_points": ["Address", "How to get there", "Parking/transport"]},
+                {"heading": "Services & Amenities", "key_points": ["Main offerings", "Facilities", "Special features"]},
+                {"heading": "Contact Information", "key_points": ["Phone/email", "Business hours", "Social media"]},
+                {"heading": "Nearby Attractions", "key_points": ["Points of interest", "Restaurants", "Activities"]},
+            ],
+            "keywords_to_include": list(set(related_keywords + [keyword, "location", "contact", "hours", "address"])),
+            "differentiation_angle": "Focus on accurate, up-to-date practical information. Make it easy to find key details.",
+            "cta_suggestions": ["Get Directions", "Contact Us", "Visit Website"],
+        }
+
+    else:  # informational (default)
+        return {
+            "keyword": keyword,
+            "intent": intent,
+            "content_type": content_type,
+            "search_volume": search_volume,
+            "title_suggestions": [
+                f"Complete Guide to {keyword_title} (2025)",
+                f"{keyword_title}: What You Need to Know Before You Go",
+                f"Everything About {keyword_title} - Tips & Insights",
+            ],
+            "meta_description": f"Discover everything about {keyword}. Our comprehensive guide covers tips, recommendations, and insider knowledge to help you make the most of your experience.",
             "target_word_count": 1500,
             "content_outline": [
-                {"heading": "Introduction", "key_points": ["What is this about", "Why it matters"]},
-                {"heading": "Key Concepts", "key_points": ["Main idea 1", "Main idea 2", "Main idea 3"]},
-                {"heading": "How To / Best Practices", "key_points": ["Step 1", "Step 2", "Step 3"]},
-                {"heading": "Conclusion", "key_points": ["Summary", "Next steps", "Call to action"]},
+                {"heading": "Introduction", "key_points": ["What this guide covers", "Why it matters", "Who this is for"]},
+                {"heading": "Overview", "key_points": ["Background information", "Key facts", "What to expect"]},
+                {"heading": "Key Highlights", "key_points": ["Top features", "Must-see/must-do", "Hidden gems"]},
+                {"heading": "Practical Tips", "key_points": ["Best time to visit/use", "Money-saving advice", "Common mistakes to avoid"]},
+                {"heading": "Frequently Asked Questions", "key_points": ["Common question 1", "Common question 2", "Common question 3"]},
+                {"heading": "Summary & Next Steps", "key_points": ["Key takeaways", "Related topics", "Action items"]},
             ],
-            "keywords_to_include": keywords + [main_keyword],
-            "differentiation_angle": f"Provide unique insights and practical examples for {main_keyword}.",
-        })
-    
-    return briefs
+            "keywords_to_include": list(set(related_keywords + [keyword, "guide", "tips", "how to", "best"])),
+            "differentiation_angle": "Provide actionable insights and practical tips that readers can immediately use.",
+            "cta_suggestions": ["Learn More", "Read Related Guide", "Get Started"],
+        }
 
 
 async def _upload_reports(

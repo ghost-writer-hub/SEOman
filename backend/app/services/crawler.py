@@ -8,6 +8,7 @@ Full site crawler with:
 - Link discovery and following
 - Robots.txt respect
 - Rate limiting
+- JavaScript rendering (Playwright)
 """
 
 import asyncio
@@ -28,6 +29,21 @@ from bs4 import BeautifulSoup
 from app.integrations.storage import get_storage_client, SEOmanStoragePaths
 
 logger = logging.getLogger(__name__)
+
+# JS Crawler import with graceful fallback
+try:
+    from app.services.js_crawler import (
+        JSCrawler,
+        JSCrawlConfig,
+        JSRenderedPage,
+        detect_spa_from_html,
+        should_use_js_rendering,
+        PLAYWRIGHT_AVAILABLE,
+    )
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
+    JSCrawler = None
+    logger.warning("JS Crawler not available")
 
 
 @dataclass
@@ -74,6 +90,12 @@ class CrawledPage:
     markdown_path: str = ""
     errors: list[str] = field(default_factory=list)
 
+    # JS rendering info
+    js_rendered: bool = False
+    js_render_time_ms: int = 0
+    spa_detected: bool = False
+    framework_detected: str = ""
+
     def to_dict(self) -> dict:
         return asdict(self)
 
@@ -93,6 +115,13 @@ class CrawlConfig:
     min_delay_ms: int = 200
     max_delay_ms: int = 2000
     backoff_multiplier: float = 1.5
+
+    # JS rendering options
+    js_rendering: bool = False  # Enable JS rendering for all pages
+    js_rendering_auto: bool = True  # Auto-detect SPAs and use JS rendering
+    js_rendering_timeout_ms: int = 30000
+    js_rendering_wait_ms: int = 1000  # Wait after load for dynamic content
+    js_min_word_count_threshold: int = 50  # Re-render if word count below this
 
 
 class SEOmanCrawler:
@@ -126,6 +155,11 @@ class SEOmanCrawler:
         self._consecutive_errors: int = 0
         self._robots_crawl_delay: float | None = None
 
+        # JS rendering
+        self._js_crawler: JSCrawler | None = None
+        self._js_rendering_available = PLAYWRIGHT_AVAILABLE and (self.config.js_rendering or self.config.js_rendering_auto)
+        self._pages_needing_js: set[str] = set()  # URLs that need JS re-rendering
+
         self.storage = None
         if self.config.store_html and tenant_id and site_id and crawl_id:
             try:
@@ -135,7 +169,7 @@ class SEOmanCrawler:
 
     async def crawl(self, seed_urls: list[str] | None = None) -> list[CrawledPage]:
         """Run the crawl and return results.
-        
+
         Args:
             seed_urls: Optional list of URLs from sitemap to seed the queue.
         """
@@ -152,6 +186,11 @@ class SEOmanCrawler:
 
         if self.config.respect_robots_txt:
             await self._fetch_robots_txt()
+
+        # Initialize JS crawler if needed
+        if self._js_rendering_available and self.config.js_rendering:
+            await self._init_js_crawler()
+            logger.info("JS rendering enabled for all pages")
 
         await self.url_queue.put((self.base_url, 0))
 
@@ -175,9 +214,93 @@ class SEOmanCrawler:
         for worker in workers:
             worker.cancel()
 
+        # Process pages that need JS rendering (auto-detected)
+        if self._js_rendering_available and self.config.js_rendering_auto and self._pages_needing_js:
+            await self._process_js_pages()
+
+        # Cleanup JS crawler
+        await self._cleanup_js_crawler()
+
         elapsed = time.time() - start_time
-        logger.info(f"Crawl complete: {len(self.results)} pages in {elapsed:.2f}s")
+        js_rendered_count = sum(1 for p in self.results if p.js_rendered)
+        logger.info(f"Crawl complete: {len(self.results)} pages in {elapsed:.2f}s ({js_rendered_count} JS-rendered)")
         return self.results
+
+    async def _init_js_crawler(self):
+        """Initialize the JS crawler."""
+        if self._js_crawler is None and JSCrawler is not None:
+            js_config = JSCrawlConfig(
+                timeout_ms=self.config.js_rendering_timeout_ms,
+                wait_after_load_ms=self.config.js_rendering_wait_ms,
+                user_agent=self.config.user_agent,
+            )
+            self._js_crawler = JSCrawler(js_config)
+            await self._js_crawler.start()
+
+    async def _cleanup_js_crawler(self):
+        """Cleanup JS crawler resources."""
+        if self._js_crawler:
+            await self._js_crawler.stop()
+            self._js_crawler = None
+
+    async def _process_js_pages(self):
+        """Re-process pages that need JS rendering."""
+        if not self._pages_needing_js:
+            return
+
+        logger.info(f"Processing {len(self._pages_needing_js)} pages with JS rendering")
+        await self._init_js_crawler()
+
+        # Find pages that need re-rendering
+        pages_to_rerender = []
+        page_index_map = {}
+
+        for i, page in enumerate(self.results):
+            if page.url in self._pages_needing_js:
+                pages_to_rerender.append(page)
+                page_index_map[page.url] = i
+
+        # Render in batches
+        batch_size = 5
+        for i in range(0, len(pages_to_rerender), batch_size):
+            batch = pages_to_rerender[i:i + batch_size]
+            urls = [p.url for p in batch]
+
+            js_results = await self._js_crawler.render_batch(urls)
+
+            for page, js_result in zip(batch, js_results):
+                if js_result.success:
+                    # Re-extract data from JS-rendered HTML
+                    updated_page = self._extract_page_data(
+                        url=page.url,
+                        final_url=js_result.final_url,
+                        status_code=js_result.status_code,
+                        html=js_result.html,
+                        load_time_ms=js_result.load_time_ms,
+                        depth=page.crawl_depth,
+                        headers=page.response_headers,
+                    )
+
+                    # Copy JS rendering info
+                    updated_page.js_rendered = True
+                    updated_page.js_render_time_ms = js_result.render_time_ms
+                    updated_page.spa_detected = js_result.spa_detected
+                    updated_page.framework_detected = js_result.framework_detected
+                    updated_page.raw_html_path = page.raw_html_path
+
+                    # Store updated HTML if configured
+                    if self.storage and self.config.store_html:
+                        await self._store_html(updated_page, js_result.html)
+
+                    # Update in results
+                    idx = page_index_map[page.url]
+                    self.results[idx] = updated_page
+
+                    logger.debug(f"JS rendered: {page.url} (word count: {page.word_count} -> {updated_page.word_count})")
+
+            # Small delay between batches
+            if i + batch_size < len(pages_to_rerender):
+                await asyncio.sleep(1)
 
     async def _resolve_start_url(self) -> str | None:
         """Try to resolve the start URL, attempting www/non-www variants if needed."""
@@ -301,13 +424,17 @@ class SEOmanCrawler:
 
     async def _crawl_url(self, url: str, depth: int) -> bool:
         """Crawl a single URL.
-        
+
         Returns:
             True if request succeeded (2xx/3xx), False if error or rate-limited.
         """
         if self.robots_parser and not self.robots_parser.can_fetch(self.config.user_agent, url):
             logger.debug(f"Blocked by robots.txt: {url}")
             return True  # Not an error, just blocked
+
+        # If JS rendering is enabled for all pages, use JS crawler directly
+        if self.config.js_rendering and self._js_crawler:
+            return await self._crawl_url_with_js(url, depth)
 
         async with self.semaphore:
             try:
@@ -339,6 +466,17 @@ class SEOmanCrawler:
                     html = response.text
                     page = self._extract_page_data(url, str(response.url), response.status_code, html, load_time_ms, depth, dict(response.headers))
 
+                    # Check if page needs JS rendering (auto-detection)
+                    if self._js_rendering_available and self.config.js_rendering_auto:
+                        needs_js, reason = await self._check_needs_js_rendering(html, page.word_count)
+                        if needs_js:
+                            logger.debug(f"Page needs JS rendering: {url} - {reason}")
+                            self._pages_needing_js.add(url)
+                            # Detect SPA info from initial HTML
+                            spa_detected, framework, _ = detect_spa_from_html(html)
+                            page.spa_detected = spa_detected
+                            page.framework_detected = framework
+
                     if self.storage and self.config.store_html:
                         await self._store_html(page, html)
 
@@ -369,6 +507,73 @@ class SEOmanCrawler:
                     crawl_depth=depth, errors=[str(e)],
                 ))
                 return False  # Trigger backoff
+
+    async def _crawl_url_with_js(self, url: str, depth: int) -> bool:
+        """Crawl a URL using JS rendering."""
+        async with self.semaphore:
+            try:
+                js_result = await self._js_crawler.render_page(url)
+
+                if not js_result.success:
+                    self.results.append(CrawledPage(
+                        url=url, final_url=url, status_code=0,
+                        content_type="", load_time_ms=js_result.load_time_ms,
+                        crawl_timestamp=js_result.timestamp,
+                        crawl_depth=depth, errors=js_result.errors,
+                        js_rendered=True,
+                    ))
+                    return False
+
+                page = self._extract_page_data(
+                    url=url,
+                    final_url=js_result.final_url,
+                    status_code=js_result.status_code,
+                    html=js_result.html,
+                    load_time_ms=js_result.load_time_ms,
+                    depth=depth,
+                    headers={},
+                )
+
+                page.js_rendered = True
+                page.js_render_time_ms = js_result.render_time_ms
+                page.spa_detected = js_result.spa_detected
+                page.framework_detected = js_result.framework_detected
+
+                if self.storage and self.config.store_html:
+                    await self._store_html(page, js_result.html)
+
+                self.results.append(page)
+
+                for link in page.internal_links:
+                    link_url = link.get("url", "")
+                    if link_url and link_url not in self.visited_urls:
+                        await self.url_queue.put((link_url, depth + 1))
+
+                return True
+
+            except Exception as e:
+                logger.error(f"JS crawl error for {url}: {e}")
+                self.results.append(CrawledPage(
+                    url=url, final_url=url, status_code=0,
+                    content_type="", load_time_ms=0,
+                    crawl_timestamp=datetime.utcnow().isoformat(),
+                    crawl_depth=depth, errors=[str(e)],
+                    js_rendered=True,
+                ))
+                return False
+
+    async def _check_needs_js_rendering(self, html: str, word_count: int) -> tuple[bool, str]:
+        """Check if a page needs JS rendering."""
+        # Low word count check
+        if word_count < self.config.js_min_word_count_threshold:
+            return True, f"Low word count ({word_count})"
+
+        # SPA detection
+        needs_js, framework, reasons = detect_spa_from_html(html)
+        if needs_js:
+            return True, f"SPA detected ({framework}): {reasons[0] if reasons else 'unknown'}"
+
+        return False, ""
 
     def _extract_page_data(
         self,

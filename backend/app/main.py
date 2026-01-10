@@ -8,7 +8,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.router import api_router
 from app.config import settings
+from app.core.rate_limit_middleware import RateLimitMiddleware
 from app.database import init_db
+from app.services.rate_limiter import close_rate_limiter
 from app.worker import celery_app
 
 
@@ -22,6 +24,7 @@ async def lifespan(app: FastAPI):
     yield
     # Shutdown
     celery_app.close()
+    await close_rate_limiter()
 
 
 app = FastAPI(
@@ -41,6 +44,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Rate limiting middleware
+if settings.RATE_LIMIT_ENABLED:
+    app.add_middleware(RateLimitMiddleware)
 
 # Include API router
 app.include_router(api_router, prefix=settings.API_V1_STR)

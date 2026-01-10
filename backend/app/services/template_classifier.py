@@ -360,48 +360,195 @@ Focus on understanding the business context and purpose of each page type."""
         for sig, group_pages in page_groups.items():
             example_urls = [p.get("url") or p.get("final_url") for p in group_pages[:10]]
 
+            # Analyze pages to generate better name and description
+            name, description, recommendations = self._analyze_template_group(sig, group_pages)
+
             template = PageTemplate(
                 template_id=sig,
-                name=self._humanize_signature(sig),
-                description=f"Pages matching pattern: {sig}",
+                name=name,
+                description=description,
                 url_patterns=self._extract_url_patterns_from_pages(group_pages),
                 page_count=len(group_pages),
                 example_urls=example_urls,
+                seo_recommendations=recommendations,
             )
             templates.append(template)
 
         return templates
 
-    def _humanize_signature(self, sig: str) -> str:
-        """Convert a signature to a human-readable name."""
-        name_map = {
-            "homepage": "Homepage",
-            "blog_post": "Blog Post",
-            "blog_index": "Blog Index",
-            "product_page": "Product Page",
-            "product_listing": "Product Listing",
-            "category_page": "Category Page",
-            "info_page": "Information Page",
-            "faq_page": "FAQ Page",
-            "legal_page": "Legal Page",
-            "_other_": "Other Pages",
+    def _analyze_template_group(
+        self,
+        sig: str,
+        pages: list[dict],
+    ) -> tuple[str, str, list[str]]:
+        """Analyze a template group to generate name, description, and recommendations."""
+
+        # Get common characteristics
+        avg_word_count = sum(p.get("word_count", 0) for p in pages) // max(len(pages), 1)
+        titles = [p.get("title", "") for p in pages if p.get("title")]
+        h1s = [h1 for p in pages for h1 in (p.get("h1", []) or [])]
+        urls = [p.get("url") or p.get("final_url", "") for p in pages]
+
+        # Detect language from signature
+        lang_suffix = ""
+        lang_code = None
+        parts = sig.split("_")
+        if parts and len(parts[-1]) == 2 and parts[-1].isalpha():
+            lang_code = parts[-1].upper()
+            lang_suffix = f" ({lang_code})"
+
+        # Generate name and description based on analysis
+        name, description = self._humanize_signature_enhanced(sig, pages, titles, avg_word_count)
+        if lang_code and not name.endswith(f"({lang_code})"):
+            name = f"{name}{lang_suffix}"
+
+        # Generate SEO recommendations based on template characteristics
+        recommendations = self._generate_template_recommendations(pages, avg_word_count)
+
+        return name, description, recommendations
+
+    def _humanize_signature_enhanced(
+        self,
+        sig: str,
+        pages: list[dict],
+        titles: list[str],
+        avg_word_count: int,
+    ) -> tuple[str, str]:
+        """Convert a signature to a human-readable name with context-aware description."""
+
+        # Enhanced name map with descriptions
+        template_info = {
+            "homepage": ("Homepage", "Main landing page of the website"),
+            "blog_post": ("Blog Article", "Individual blog posts or news articles"),
+            "blog_index": ("Blog Index", "Blog listing page showing multiple posts"),
+            "product_page": ("Product Page", "Individual product detail pages"),
+            "product_listing": ("Product Listing", "Category or collection pages showing multiple products"),
+            "category_page": ("Category Page", "Pages organizing content into categories"),
+            "info_page": ("Information Page", "About, contact, and general information pages"),
+            "faq_page": ("FAQ Page", "Frequently asked questions pages"),
+            "legal_page": ("Legal Page", "Privacy policy, terms, and legal content"),
+            "_other_": ("Miscellaneous", "Pages that don't match common patterns"),
+            "content_page": ("Content Page", "Standard content pages"),
+            "file_html": ("Static Page", "Static HTML pages"),
+            "gallery": ("Gallery Page", "Image-heavy gallery or portfolio pages"),
+            "minimal": ("Utility Page", "Pages with minimal content (redirects, confirmations)"),
+            "long_form": ("Long-Form Content", "Detailed guides or comprehensive articles"),
         }
 
-        # Check for exact match
-        base_sig = sig.split("_")[0] + "_" + sig.split("_")[1] if "_" in sig else sig
-        if sig in name_map:
-            return name_map[sig]
+        # Remove language suffix for lookup
+        base_sig = sig
+        for lang in ["_en", "_es", "_de", "_fr", "_it", "_pt"]:
+            if sig.endswith(lang):
+                base_sig = sig[:-3]
+                break
 
-        # Check for language variant
-        for key, name in name_map.items():
-            if sig.startswith(key):
-                lang = sig.replace(key + "_", "")
-                if len(lang) == 2:
-                    return f"{name} ({lang.upper()})"
-                return name
+        # Remove content type suffix for lookup
+        for suffix in ["_long_form", "_gallery", "_minimal"]:
+            if base_sig.endswith(suffix):
+                base_sig = base_sig.replace(suffix, "")
+                break
 
-        # Humanize the signature
-        return sig.replace("_", " ").title()
+        # Check for exact match first
+        if base_sig in template_info:
+            name, desc = template_info[base_sig]
+        else:
+            # Try partial matches
+            found = False
+            for key, (name, desc) in template_info.items():
+                if key in base_sig:
+                    found = True
+                    break
+            if not found:
+                name = base_sig.replace("_", " ").title()
+                desc = f"Pages with {base_sig.replace('_', ' ')} structure"
+
+        # Enhance description with statistics
+        page_count = len(pages)
+        if avg_word_count > 0:
+            desc = f"{desc}. Average {avg_word_count:,} words per page."
+
+        # Try to detect content theme from titles
+        if titles:
+            common_words = self._find_common_title_words(titles)
+            if common_words:
+                theme = ", ".join(common_words[:3])
+                desc = f"{desc} Common themes: {theme}."
+
+        return name, desc
+
+    def _find_common_title_words(self, titles: list[str]) -> list[str]:
+        """Find commonly occurring words in titles."""
+        from collections import Counter
+
+        # Stopwords to ignore
+        stopwords = {
+            "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
+            "of", "with", "by", "from", "is", "are", "was", "were", "be", "been",
+            "being", "have", "has", "had", "do", "does", "did", "will", "would",
+            "could", "should", "may", "might", "must", "shall", "can", "need",
+            "de", "la", "el", "los", "las", "un", "una", "en", "y", "que", "del",
+            "por", "con", "para", "es", "son", "o7", "hotels", "hotel", "-", "|",
+        }
+
+        words = []
+        for title in titles:
+            for word in title.lower().split():
+                # Clean word
+                word = word.strip(".,!?()[]{}:;\"'")
+                if word and word not in stopwords and len(word) > 2:
+                    words.append(word)
+
+        # Get most common words
+        counter = Counter(words)
+        common = [word for word, count in counter.most_common(10) if count >= 2]
+        return common[:3]
+
+    def _generate_template_recommendations(
+        self,
+        pages: list[dict],
+        avg_word_count: int,
+    ) -> list[str]:
+        """Generate SEO recommendations for a template type."""
+        recommendations = []
+
+        # Check for common issues
+        pages_without_meta = sum(1 for p in pages if not p.get("meta_description"))
+        pages_without_h1 = sum(1 for p in pages if not p.get("h1"))
+        pages_with_multiple_h1 = sum(1 for p in pages if len(p.get("h1", []) or []) > 1)
+        pages_low_word_count = sum(1 for p in pages if (p.get("word_count") or 0) < 300)
+
+        total = len(pages)
+        if total == 0:
+            return recommendations
+
+        # Meta description
+        if pages_without_meta / total > 0.3:
+            recommendations.append(
+                f"Add meta descriptions: {pages_without_meta}/{total} pages missing meta descriptions"
+            )
+
+        # H1 issues
+        if pages_without_h1 / total > 0.2:
+            recommendations.append(
+                f"Add H1 headings: {pages_without_h1}/{total} pages missing H1 tags"
+            )
+        if pages_with_multiple_h1 / total > 0.3:
+            recommendations.append(
+                f"Fix multiple H1s: {pages_with_multiple_h1}/{total} pages have more than one H1"
+            )
+
+        # Content length
+        if pages_low_word_count / total > 0.5 and avg_word_count < 300:
+            recommendations.append(
+                f"Expand thin content: Average word count is only {avg_word_count}. Consider adding more content."
+            )
+
+        return recommendations
+
+    def _humanize_signature(self, sig: str) -> str:
+        """Convert a signature to a human-readable name (legacy compatibility)."""
+        name, _ = self._humanize_signature_enhanced(sig, [], [], 0)
+        return name
 
     def _extract_url_patterns_from_pages(self, pages: list[dict]) -> list[str]:
         """Extract common URL patterns from a group of pages."""

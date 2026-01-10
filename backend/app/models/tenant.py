@@ -33,6 +33,8 @@ class Tenant(Base, BaseModel):
     # Relationships
     users = relationship("User", back_populates="tenant", cascade="all, delete-orphan")
     sites = relationship("Site", back_populates="tenant", cascade="all, delete-orphan")
-    
+    usage_records = relationship("TenantUsage", back_populates="tenant", cascade="all, delete-orphan")
+    quota = relationship("TenantQuota", back_populates="tenant", uselist=False, cascade="all, delete-orphan")
+
     def __repr__(self) -> str:
         return f"<Tenant {self.name} ({self.slug})>"

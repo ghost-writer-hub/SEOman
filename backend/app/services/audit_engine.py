@@ -327,22 +327,26 @@ class SEOAuditEngine:
         ))
 
         # Check 12: Title Too Short (<30 chars)
-        short_title = [p["url"] for p in self.data.pages if p.get("title") and len(p["title"]) < 30]
+        short_title_pages = [(p["url"], len(p["title"])) for p in self.data.pages if p.get("title") and len(p["title"]) < 30]
+        short_title_details = {url: {"current": length, "target": "50-60 chars"} for url, length in short_title_pages[:10]}
         self.results.append(AuditCheckResult(
             check_id=12, category=cat, check_name="Title Too Short (<30 chars)",
-            passed=len(short_title) == 0, severity="medium",
-            affected_count=len(short_title),
-            affected_urls=short_title[:50],
+            passed=len(short_title_pages) == 0, severity="medium",
+            affected_count=len(short_title_pages),
+            affected_urls=[url for url, _ in short_title_pages[:50]],
+            details={"pages": short_title_details},
             recommendation="Expand titles to 50-60 characters for better SEO.",
         ))
 
         # Check 13: Title Too Long (>60 chars)
-        long_title = [p["url"] for p in self.data.pages if p.get("title") and len(p["title"]) > 60]
+        long_title_pages = [(p["url"], len(p["title"])) for p in self.data.pages if p.get("title") and len(p["title"]) > 60]
+        long_title_details = {url: {"current": length, "target": "<60 chars"} for url, length in long_title_pages[:10]}
         self.results.append(AuditCheckResult(
             check_id=13, category=cat, check_name="Title Too Long (>60 chars)",
-            passed=len(long_title) == 0, severity="low",
-            affected_count=len(long_title),
-            affected_urls=long_title[:50],
+            passed=len(long_title_pages) == 0, severity="low",
+            affected_count=len(long_title_pages),
+            affected_urls=[url for url, _ in long_title_pages[:50]],
+            details={"pages": long_title_details},
             recommendation="Shorten titles to under 60 characters to avoid truncation.",
         ))
 
@@ -377,12 +381,21 @@ class SEOAuditEngine:
         for page in self.data.pages:
             desc = page.get("meta_description", "")
             if desc and (len(desc) < 70 or len(desc) > 160):
-                bad_desc_len.append({"url": page["url"], "length": len(desc)})
+                issue_type = "too short" if len(desc) < 70 else "too long"
+                bad_desc_len.append({
+                    "url": page["url"],
+                    "current": len(desc),
+                    "issue": issue_type,
+                    "target": "150-160 chars",
+                })
+        desc_details = {item["url"]: {"current": f"{item['current']} chars ({item['issue']})", "target": item["target"]}
+                        for item in bad_desc_len[:10]}
         self.results.append(AuditCheckResult(
             check_id=16, category=cat, check_name="Meta Description Length",
             passed=len(bad_desc_len) == 0, severity="low",
             affected_count=len(bad_desc_len),
             affected_urls=[b["url"] for b in bad_desc_len[:50]],
+            details={"pages": desc_details},
             recommendation="Optimize meta descriptions to 150-160 characters.",
         ))
 
@@ -483,13 +496,17 @@ class SEOAuditEngine:
         ))
 
         # Check 24: TTFB > 800ms
-        slow_ttfb = [p["url"] for p in self.data.pages if p.get("load_time_ms", 0) > 800]
+        slow_ttfb_pages = [(p["url"], p.get("load_time_ms", 0)) for p in self.data.pages if p.get("load_time_ms", 0) > 800]
+        ttfb_details = {url: {"current": f"{int(ttfb)}ms", "target": "<800ms"}
+                        for url, ttfb in slow_ttfb_pages[:10]}
+        avg_ttfb = sum(t for _, t in slow_ttfb_pages) // max(len(slow_ttfb_pages), 1) if slow_ttfb_pages else 0
         self.results.append(AuditCheckResult(
             check_id=24, category=cat, check_name="TTFB > 800ms",
-            passed=len(slow_ttfb) == 0, severity="medium",
-            affected_count=len(slow_ttfb),
-            affected_urls=slow_ttfb[:50],
-            recommendation="Improve server response time to under 800ms.",
+            passed=len(slow_ttfb_pages) == 0, severity="medium",
+            affected_count=len(slow_ttfb_pages),
+            affected_urls=[url for url, _ in slow_ttfb_pages[:50]],
+            details={"pages": ttfb_details, "average_ttfb_ms": avg_ttfb},
+            recommendation=f"Improve server response time to under 800ms. Current average: {avg_ttfb}ms." if avg_ttfb else "Improve server response time to under 800ms.",
         ))
 
         # Check 25: Render-Blocking Resources
@@ -744,19 +761,22 @@ class SEOAuditEngine:
                     incoming_links[link_url].add(url)
                     outgoing_links[url].add(link_url)
 
-        # Check 41: Orphan Pages (duplicate of check 9 but in linking context)
+        # Check 41: Pages with Low Incoming Links (not orphan, but poorly linked)
         homepage = self.data.base_url.rstrip("/")
-        orphans = []
+        poorly_linked = []
         for page in self.data.pages:
             url = page.get("url", "").rstrip("/")
-            if url != homepage and len(incoming_links.get(url, set())) == 0 and page.get("status_code") == 200:
-                orphans.append(page["url"])
+            incoming_count = len(incoming_links.get(url, set()))
+            # Pages with only 1-2 incoming links (but not orphans, which are handled by check 9)
+            if url != homepage and 0 < incoming_count <= 2 and page.get("status_code") == 200:
+                poorly_linked.append({"url": page["url"], "incoming_links": incoming_count})
         self.results.append(AuditCheckResult(
-            check_id=41, category=cat, check_name="Orphan Pages",
-            passed=len(orphans) == 0, severity="high",
-            affected_count=len(orphans),
-            affected_urls=orphans[:50],
-            recommendation="Add internal links to pages with no incoming links.",
+            check_id=41, category=cat, check_name="Poorly Linked Pages",
+            passed=len(poorly_linked) == 0, severity="medium",
+            affected_count=len(poorly_linked),
+            affected_urls=[p["url"] for p in poorly_linked[:50]],
+            details={"pages": {p["url"]: {"incoming_links": p["incoming_links"]} for p in poorly_linked[:10]}},
+            recommendation="Increase internal links to important pages. These pages have only 1-2 incoming links.",
         ))
 
         # Check 42: Broken Internal Links (404)

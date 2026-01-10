@@ -5,7 +5,8 @@ Background tasks for keyword research and tracking.
 """
 
 import asyncio
-from datetime import datetime
+import logging
+from datetime import datetime, timezone
 from typing import List, Dict, Any
 from uuid import UUID
 
@@ -14,10 +15,12 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session_maker
-from app.models.keyword import Keyword, KeywordCluster, KeywordGap
+from app.models.keyword import Keyword, KeywordCluster, KeywordGap, KeywordRanking
 from app.models.site import Site
 from app.integrations.dataforseo import DataForSEOClient
 from app.integrations.llm import get_llm_client, cluster_keywords
+
+logger = logging.getLogger(__name__)
 
 
 def run_async(coro):
@@ -133,60 +136,139 @@ def update_keyword_rankings(self, site_id: str, tenant_id: str):
 
 
 async def _update_keyword_rankings(task, site_id: str, tenant_id: str):
-    """Check current rankings for site keywords."""
+    """
+    Check current rankings for site keywords.
+
+    For each tracked keyword:
+    1. Fetch SERP results from DataForSEO
+    2. Find the site's position in organic results
+    3. Store historical ranking data
+    4. Update keyword's current/previous position
+    5. Track best position achieved
+    """
     async with async_session_maker() as session:
         site = await session.get(Site, UUID(site_id))
-        
+
         if not site:
             return {"error": "Site not found"}
-        
-        # Get keywords to check
+
+        # Get tracked keywords
         stmt = select(Keyword).where(
             Keyword.site_id == site.id,
             Keyword.is_tracked == True,
         )
         result = await session.execute(stmt)
         keywords = result.scalars().all()
-        
+
         if not keywords:
-            return {"message": "No tracked keywords found"}
-        
+            return {"message": "No tracked keywords found", "site_id": site_id}
+
+        logger.info(f"Checking rankings for {len(keywords)} keywords on site {site.primary_domain}")
+
         try:
             client = DataForSEOClient()
+            now = datetime.now(timezone.utc)
+
             updated = 0
-            
-            for keyword in keywords:
-                # Get SERP data
-                serp_result = await client.get_serp(
-                    keyword=keyword.keyword,
-                    location_name="United States",
-                    language_code="en",
+            rankings_created = 0
+            errors = []
+
+            # Process keywords in batches
+            keyword_texts = [kw.text for kw in keywords]
+            keyword_map = {kw.text: kw for kw in keywords}
+
+            # Get the primary domain for matching
+            primary_domain = site.primary_domain.lower()
+            if primary_domain.startswith("www."):
+                primary_domain = primary_domain[4:]
+
+            # Fetch SERP data in batches
+            serp_results = await client.get_rankings_batch(
+                keywords=keyword_texts,
+                country=site.target_countries[0] if site.target_countries else "US",
+                language=site.default_language or "en",
+                batch_size=10,
+            )
+
+            for serp_result in serp_results:
+                keyword_text = serp_result.get("keyword")
+                keyword = keyword_map.get(keyword_text)
+
+                if not keyword:
+                    continue
+
+                if not serp_result.get("success"):
+                    errors.append({
+                        "keyword": keyword_text,
+                        "error": serp_result.get("error", "Unknown error"),
+                    })
+                    continue
+
+                organic = serp_result.get("organic", [])
+                serp_features = serp_result.get("serp_features", {})
+                competitor_positions = serp_result.get("competitor_positions", [])
+
+                # Find our position in organic results
+                position = None
+                ranking_url = None
+
+                for item in organic:
+                    item_domain = item.get("domain", "").lower()
+                    if item_domain.startswith("www."):
+                        item_domain = item_domain[4:]
+
+                    if item_domain == primary_domain:
+                        position = item.get("position")
+                        ranking_url = item.get("url")
+                        break
+
+                # Store previous position before updating
+                previous_position = keyword.current_position
+
+                # Update keyword with new ranking data
+                keyword.previous_position = previous_position
+                keyword.current_position = position
+                keyword.ranking_url = ranking_url
+                keyword.last_checked_at = now
+
+                # Update best position if this is better
+                if position is not None:
+                    if keyword.best_position is None or position < keyword.best_position:
+                        keyword.best_position = position
+
+                # Create historical ranking record
+                ranking = KeywordRanking(
+                    keyword_id=keyword.id,
+                    site_id=site.id,
+                    position=position,
+                    url=ranking_url,
+                    serp_features=serp_features,
+                    competitor_positions=competitor_positions,
+                    checked_at=now,
                 )
-                
-                if serp_result.get("success"):
-                    organic = serp_result.get("organic", [])
-                    
-                    position = None
-                    for i, item in enumerate(organic, 1):
-                        if site.primary_domain in item.get("url", ""):
-                            position = i
-                            break
-                    
-                    # Update keyword
-                    keyword.current_position = position
-                    keyword.previous_position = keyword.current_position
-                    keyword.last_checked_at = datetime.utcnow()
-                    updated += 1
-            
+                session.add(ranking)
+                rankings_created += 1
+                updated += 1
+
             await session.commit()
-            
+
+            logger.info(
+                f"Rankings updated for site {site.primary_domain}: "
+                f"{updated} keywords updated, {rankings_created} historical records created"
+            )
+
             return {
                 "site_id": site_id,
+                "domain": site.primary_domain,
                 "keywords_checked": len(keywords),
                 "keywords_updated": updated,
+                "rankings_created": rankings_created,
+                "errors": errors[:10] if errors else [],
+                "checked_at": now.isoformat(),
             }
-            
+
         except Exception as e:
+            logger.error(f"Error updating rankings for site {site_id}: {e}")
             raise task.retry(exc=e, countdown=120)
 
 
@@ -208,12 +290,112 @@ async def _update_all_rankings():
         )
         result = await session.execute(stmt)
         sites = result.scalars().all()
-        
+
+        logger.info(f"Queueing ranking updates for {len(sites)} sites")
+
         for site in sites:
             # Queue individual update tasks
             update_keyword_rankings.delay(str(site.id), str(site.tenant_id))
-        
-        return {"sites_queued": len(sites)}
+
+        return {
+            "sites_queued": len(sites),
+            "site_ids": [str(s.id) for s in sites],
+        }
+
+
+@shared_task(bind=True)
+def set_keyword_tracking(
+    self,
+    site_id: str,
+    keyword_ids: List[str],
+    is_tracked: bool,
+    tenant_id: str,
+):
+    """Enable or disable tracking for specific keywords."""
+    return run_async(_set_keyword_tracking(site_id, keyword_ids, is_tracked))
+
+
+async def _set_keyword_tracking(
+    site_id: str,
+    keyword_ids: List[str],
+    is_tracked: bool,
+):
+    """Update tracking status for keywords."""
+    async with async_session_maker() as session:
+        site = await session.get(Site, UUID(site_id))
+
+        if not site:
+            return {"error": "Site not found"}
+
+        updated = 0
+        for keyword_id in keyword_ids:
+            keyword = await session.get(Keyword, UUID(keyword_id))
+            if keyword and keyword.site_id == site.id:
+                keyword.is_tracked = is_tracked
+                updated += 1
+
+        await session.commit()
+
+        logger.info(
+            f"Updated tracking for {updated} keywords on site {site.primary_domain} "
+            f"(is_tracked={is_tracked})"
+        )
+
+        return {
+            "site_id": site_id,
+            "keywords_updated": updated,
+            "is_tracked": is_tracked,
+        }
+
+
+@shared_task(bind=True)
+def track_top_keywords(
+    self,
+    site_id: str,
+    tenant_id: str,
+    limit: int = 50,
+    min_volume: int = 100,
+):
+    """Automatically track top keywords by search volume."""
+    return run_async(_track_top_keywords(site_id, limit, min_volume))
+
+
+async def _track_top_keywords(site_id: str, limit: int, min_volume: int):
+    """Enable tracking for top keywords by search volume."""
+    async with async_session_maker() as session:
+        site = await session.get(Site, UUID(site_id))
+
+        if not site:
+            return {"error": "Site not found"}
+
+        # Get top keywords by volume that aren't already tracked
+        stmt = (
+            select(Keyword)
+            .where(
+                Keyword.site_id == site.id,
+                Keyword.is_tracked == False,
+                Keyword.search_volume >= min_volume,
+            )
+            .order_by(Keyword.search_volume.desc())
+            .limit(limit)
+        )
+        result = await session.execute(stmt)
+        keywords = result.scalars().all()
+
+        for keyword in keywords:
+            keyword.is_tracked = True
+
+        await session.commit()
+
+        logger.info(
+            f"Enabled tracking for {len(keywords)} top keywords on site {site.primary_domain}"
+        )
+
+        return {
+            "site_id": site_id,
+            "keywords_tracked": len(keywords),
+            "keywords": [{"id": str(k.id), "text": k.text, "volume": k.search_volume} for k in keywords[:10]],
+        }
 
 
 @shared_task(bind=True)

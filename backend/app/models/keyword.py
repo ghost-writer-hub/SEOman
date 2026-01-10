@@ -1,7 +1,8 @@
 """
 Keyword models for SEO keyword research.
 """
-from sqlalchemy import Boolean, Column, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
+from datetime import datetime
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
 
@@ -10,9 +11,9 @@ from app.models.base import Base, BaseModel
 
 class Keyword(Base, BaseModel):
     """Keyword data from research."""
-    
+
     __tablename__ = "keywords"
-    
+
     site_id = Column(
         UUID(as_uuid=True),
         ForeignKey("sites.id", ondelete="CASCADE"),
@@ -29,7 +30,15 @@ class Keyword(Base, BaseModel):
     intent = Column(String(50), nullable=True)
     trend = Column(JSONB, default=list)
     dataforseo_raw = Column(JSONB, nullable=True)
-    
+
+    # Rank tracking fields
+    is_tracked = Column(Boolean, default=False, index=True)
+    current_position = Column(Integer, nullable=True)
+    previous_position = Column(Integer, nullable=True)
+    best_position = Column(Integer, nullable=True)
+    ranking_url = Column(Text, nullable=True)
+    last_checked_at = Column(DateTime(timezone=True), nullable=True)
+
     # Relationships
     site = relationship("Site", back_populates="keywords")
     clusters = relationship(
@@ -37,11 +46,17 @@ class Keyword(Base, BaseModel):
         secondary="keyword_cluster_members",
         back_populates="keywords",
     )
-    
+    rankings = relationship(
+        "KeywordRanking",
+        back_populates="keyword",
+        cascade="all, delete-orphan",
+        order_by="desc(KeywordRanking.checked_at)",
+    )
+
     __table_args__ = (
         UniqueConstraint("site_id", "text", "language", "country", name="uq_keyword_site_text"),
     )
-    
+
     def __repr__(self) -> str:
         return f"<Keyword {self.text[:30]}... (vol: {self.search_volume})>"
 
@@ -126,6 +141,41 @@ class KeywordGap(Base, BaseModel):
     __table_args__ = (
         UniqueConstraint("site_id", "keyword", name="uq_keyword_gap_site_keyword"),
     )
-    
+
     def __repr__(self) -> str:
         return f"<KeywordGap {self.keyword[:30]}... (vol: {self.search_volume})>"
+
+
+class KeywordRanking(Base, BaseModel):
+    """Historical ranking data for a keyword."""
+
+    __tablename__ = "keyword_rankings"
+
+    keyword_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("keywords.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    site_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("sites.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    position = Column(Integer, nullable=True)
+    url = Column(Text, nullable=True)
+    serp_features = Column(JSONB, default=dict)
+    competitor_positions = Column(JSONB, default=list)
+    checked_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        index=True,
+    )
+
+    # Relationships
+    keyword = relationship("Keyword", back_populates="rankings")
+    site = relationship("Site", back_populates="keyword_rankings")
+
+    def __repr__(self) -> str:
+        return f"<KeywordRanking keyword={self.keyword_id} pos={self.position}>"

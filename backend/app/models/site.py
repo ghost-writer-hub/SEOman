@@ -35,6 +35,7 @@ class Site(Base, BaseModel):
     keywords = relationship("Keyword", back_populates="site", cascade="all, delete-orphan")
     keyword_clusters = relationship("KeywordCluster", back_populates="site", cascade="all, delete-orphan")
     keyword_gaps = relationship("KeywordGap", back_populates="site", cascade="all, delete-orphan")
+    keyword_rankings = relationship("KeywordRanking", back_populates="site", cascade="all, delete-orphan")
     seo_plans = relationship("SeoPlan", back_populates="site", cascade="all, delete-orphan")
     content_briefs = relationship("ContentBrief", back_populates="site", cascade="all, delete-orphan")
     
