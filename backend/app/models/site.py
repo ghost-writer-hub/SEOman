@@ -38,6 +38,11 @@ class Site(Base, BaseModel):
     keyword_rankings = relationship("KeywordRanking", back_populates="site", cascade="all, delete-orphan")
     seo_plans = relationship("SeoPlan", back_populates="site", cascade="all, delete-orphan")
     content_briefs = relationship("ContentBrief", back_populates="site", cascade="all, delete-orphan")
-    
+
+    # Alert relationships
+    alert_rules = relationship("AlertRule", back_populates="site", cascade="all, delete-orphan")
+    alert_events = relationship("AlertEvent", back_populates="site", cascade="all, delete-orphan")
+    uptime_checks = relationship("UptimeCheck", back_populates="site", cascade="all, delete-orphan")
+
     def __repr__(self) -> str:
         return f"<Site {self.name} ({self.primary_domain})>"

@@ -98,9 +98,17 @@ class Settings(BaseSettings):
     # Quick SEO Analyzer Configuration
     PYTHON_SEOANALYZER_URL: str = os.getenv("PYTHON_SEOANALYZER_URL", "http://quick-analyzer:8080")
     PYTHON_SEOANALYZER_TIMEOUT: int = int(os.getenv("PYTHON_SEOANALYZER_TIMEOUT", "30"))
-    
+
     # Analyzer Selection
     DEFAULT_AUDIT_THRESHOLD_PAGES: int = 1000
+
+    # SMTP Configuration (for alert notifications)
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM: str = "alerts@seoman.io"
+    SMTP_USE_TLS: bool = True
     
     class Config:
         env_file = ".env"

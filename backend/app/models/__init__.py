@@ -10,6 +10,16 @@ from app.models.audit import AuditRun, SeoIssue, SEOAuditCheck, IssueSeverity, I
 from app.models.keyword import Keyword, KeywordCluster, KeywordGap, KeywordGapStatus
 from app.models.plan import SeoPlan, SeoTask, TaskStatus, TaskCategory
 from app.models.content import ContentBrief, ContentDraft, DraftStatus, PageType
+from app.models.alert import (
+    AlertRule,
+    AlertEvent,
+    UptimeCheck,
+    AlertType,
+    AlertSeverity,
+    AlertRuleStatus,
+    AlertEventStatus,
+    NotificationChannel,
+)
 
 __all__ = [
     "Base",
@@ -41,4 +51,12 @@ __all__ = [
     "ContentDraft",
     "DraftStatus",
     "PageType",
+    "AlertRule",
+    "AlertEvent",
+    "UptimeCheck",
+    "AlertType",
+    "AlertSeverity",
+    "AlertRuleStatus",
+    "AlertEventStatus",
+    "NotificationChannel",
 ]

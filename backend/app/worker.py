@@ -27,6 +27,7 @@ celery_app = Celery(
         "app.tasks.content_tasks",
         "app.tasks.export_tasks",
         "app.tasks.pipeline_tasks",
+        "app.tasks.alert_tasks",
     ],
 )
 
@@ -68,6 +69,7 @@ celery_app.conf.update(
         "app.tasks.keyword_tasks.*": {"queue": "keyword"},
         "app.tasks.content_tasks.*": {"queue": "content"},
         "app.tasks.export_tasks.*": {"queue": "export"},
+        "app.tasks.alert_tasks.*": {"queue": "alerts"},
     },
     
     # Default queue
@@ -104,6 +106,38 @@ celery_app.conf.beat_schedule = {
     "generate-weekly-reports": {
         "task": "app.tasks.export_tasks.generate_weekly_reports",
         "schedule": crontab(day_of_week=1, hour=6, minute=0),
+    },
+
+    # === Alert Monitoring Tasks ===
+
+    # Check site uptime every 5 minutes
+    "check-site-uptime": {
+        "task": "app.tasks.alert_tasks.check_site_uptime",
+        "schedule": crontab(minute="*/5"),
+    },
+
+    # Check for ranking drops daily at 4 AM (after ranking updates at 3 AM)
+    "check-ranking-drops": {
+        "task": "app.tasks.alert_tasks.check_ranking_drops",
+        "schedule": crontab(hour=4, minute=0),
+    },
+
+    # Check for audit score drops hourly at :30
+    "check-audit-score-drops": {
+        "task": "app.tasks.alert_tasks.check_audit_score_drops",
+        "schedule": crontab(minute=30),
+    },
+
+    # Check for index status changes daily at 5 AM
+    "check-index-status": {
+        "task": "app.tasks.alert_tasks.check_index_status",
+        "schedule": crontab(hour=5, minute=0),
+    },
+
+    # Auto-resolve alerts when conditions improve every 30 minutes
+    "auto-resolve-alerts": {
+        "task": "app.tasks.alert_tasks.auto_resolve_alerts",
+        "schedule": crontab(minute="*/30"),
     },
 }
 
