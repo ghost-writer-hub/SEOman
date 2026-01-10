@@ -1,0 +1,1 @@
+"""SEOman test suite."""
