@@ -114,7 +114,15 @@ class Settings(BaseSettings):
     PAGESPEED_API_KEY: str = ""  # Google Cloud API key
     PAGESPEED_TIMEOUT: int = 60  # PSI can be slow
     PAGESPEED_MAX_PAGES_PER_TEMPLATE: int = 3
-    
+
+    # PDF Report Configuration
+    PDF_GENERATION_ENABLED: bool = True
+    PDF_PAGE_SIZE: str = "A4"  # A4, Letter
+    PDF_MARGIN_TOP: str = "20mm"
+    PDF_MARGIN_BOTTOM: str = "20mm"
+    PDF_MARGIN_LEFT: str = "15mm"
+    PDF_MARGIN_RIGHT: str = "15mm"
+
     class Config:
         env_file = ".env"
         case_sensitive = True

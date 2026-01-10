@@ -16,6 +16,7 @@ from app.api.v1.dashboard import router as dashboard_router
 from app.api.v1.analyze import router as analyze_router
 from app.api.v1.audit_v2 import router as audit_v2_router
 from app.api.v1.usage import router as usage_router
+from app.api.v1.reports import router as reports_router
 
 api_router = APIRouter()
 
@@ -32,3 +33,4 @@ api_router.include_router(content_router)
 api_router.include_router(dashboard_router)
 api_router.include_router(usage_router)
 api_router.include_router(performance_router)
+api_router.include_router(reports_router)
