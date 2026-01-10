@@ -20,6 +20,7 @@ from app.models.alert import (
     AlertEventStatus,
     NotificationChannel,
 )
+from app.models.performance import PerformanceSnapshot
 
 __all__ = [
     "Base",
@@ -59,4 +60,5 @@ __all__ = [
     "AlertRuleStatus",
     "AlertEventStatus",
     "NotificationChannel",
+    "PerformanceSnapshot",
 ]

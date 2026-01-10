@@ -109,6 +109,11 @@ class Settings(BaseSettings):
     SMTP_PASSWORD: str = ""
     SMTP_FROM: str = "alerts@seoman.io"
     SMTP_USE_TLS: bool = True
+
+    # PageSpeed Insights Configuration
+    PAGESPEED_API_KEY: str = ""  # Google Cloud API key
+    PAGESPEED_TIMEOUT: int = 60  # PSI can be slow
+    PAGESPEED_MAX_PAGES_PER_TEMPLATE: int = 3
     
     class Config:
         env_file = ".env"

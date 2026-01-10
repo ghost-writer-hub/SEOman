@@ -44,5 +44,8 @@ class Site(Base, BaseModel):
     alert_events = relationship("AlertEvent", back_populates="site", cascade="all, delete-orphan")
     uptime_checks = relationship("UptimeCheck", back_populates="site", cascade="all, delete-orphan")
 
+    # Performance relationships
+    performance_snapshots = relationship("PerformanceSnapshot", back_populates="site", cascade="all, delete-orphan")
+
     def __repr__(self) -> str:
         return f"<Site {self.name} ({self.primary_domain})>"

@@ -165,6 +165,55 @@ async def _run_full_seo_pipeline(
             else:
                 logger.info("[PIPELINE v2.0] Step 3/10: Skipped template classification")
 
+            # Step 3.5: PageSpeed Insights Analysis (optional, runs after template classification)
+            psi_snapshots = []
+            from app.config import settings as app_settings
+            if app_settings.PAGESPEED_API_KEY and pages_dict:
+                step_start = time.time()
+                logger.info("[PIPELINE v2.0] Step 3.5: Running PageSpeed Insights analysis...")
+                try:
+                    from app.services.performance_service import PerformanceService
+                    from collections import defaultdict
+
+                    # Group pages by template type and pick top 3 per template
+                    by_template = defaultdict(list)
+                    for page in pages_dict:
+                        template = page.get("template_type") or "unknown"
+                        by_template[template].append(page)
+
+                    urls_to_analyze = []
+                    for template, template_pages in by_template.items():
+                        sorted_pages = sorted(
+                            template_pages,
+                            key=lambda x: x.get("word_count", 0),
+                            reverse=True,
+                        )
+                        for p in sorted_pages[:app_settings.PAGESPEED_MAX_PAGES_PER_TEMPLATE]:
+                            urls_to_analyze.append((p["url"], template))
+
+                    if urls_to_analyze:
+                        perf_service = PerformanceService(session)
+                        psi_snapshots = await perf_service.analyze_urls(
+                            site_id=site.id,
+                            tenant_id=site.tenant_id,
+                            urls_with_templates=urls_to_analyze,
+                            strategies=["mobile"],  # Mobile-only for speed
+                        )
+                        logger.info(f"[PIPELINE v2.0] Step 3.5: Complete in {time.time() - step_start:.2f}s - {len(psi_snapshots)} pages analyzed")
+                        result["psi_pages_analyzed"] = len(psi_snapshots)
+
+                        # Calculate average score for result
+                        scores = [s.performance_score for s in psi_snapshots if s.performance_score]
+                        if scores:
+                            result["psi_avg_score"] = sum(scores) // len(scores)
+                except Exception as e:
+                    logger.warning(f"[PIPELINE v2.0] Step 3.5: PageSpeed analysis failed (non-critical) - {e}")
+            else:
+                if not app_settings.PAGESPEED_API_KEY:
+                    logger.info("[PIPELINE v2.0] Step 3.5: Skipped PageSpeed analysis (API key not configured)")
+                else:
+                    logger.info("[PIPELINE v2.0] Step 3.5: Skipped PageSpeed analysis (no pages)")
+
             # Step 4: Keyword research with DataForSEO
             step_start = time.time()
             keyword_data: dict[str, Any] = {"keywords": [], "clusters": []}
