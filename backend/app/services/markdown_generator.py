@@ -9,6 +9,8 @@ from datetime import datetime
 from typing import Dict, Any, List, Optional
 import re
 
+from app.services.seo_recommendations import get_detailed_recommendation
+
 
 class MarkdownGenerator:
     """Generates markdown reports from SEO data."""
@@ -133,25 +135,54 @@ class MarkdownGenerator:
                     suggested_fix = issue.get("suggested_fix", issue.get("recommendation", ""))
                     affected_urls = issue.get("affected_urls", [])
                     category = issue.get("category", "General")
-                    
+                    details = issue.get("details", {})
+
+                    # Get detailed recommendation with code examples
+                    detailed_rec = get_detailed_recommendation(title, details)
+
                     lines.extend([
                         f"### {idx}. {title}",
                         f"",
                         f"**Category:** {category}  ",
-                        f"**Severity:** {severity.capitalize()}",
+                        f"**Severity:** {severity.capitalize()}  ",
+                        f"**Affected:** {len(affected_urls)} page{'s' if len(affected_urls) != 1 else ''}",
                         f"",
                     ])
-                    
-                    if description:
+
+                    # Use detailed description if available
+                    if detailed_rec.get("description"):
+                        lines.extend([detailed_rec["description"], ""])
+                    elif description:
                         lines.extend([description, ""])
-                    
-                    if suggested_fix:
+
+                    # Why it matters
+                    if detailed_rec.get("why_it_matters"):
                         lines.extend([
-                            f"**Recommended Fix:**",
-                            f"> {suggested_fix}",
+                            f"**Why it matters:** {detailed_rec['why_it_matters']}",
                             f"",
                         ])
-                    
+
+                    # How to fix
+                    if detailed_rec.get("how_to_fix"):
+                        lines.extend([
+                            f"**How to fix:** {detailed_rec['how_to_fix']}",
+                            f"",
+                        ])
+                    elif suggested_fix:
+                        lines.extend([
+                            f"**How to fix:** {suggested_fix}",
+                            f"",
+                        ])
+
+                    # Code example
+                    if detailed_rec.get("code_example"):
+                        lines.extend([
+                            f"**Code Example:**",
+                            f"",
+                            detailed_rec["code_example"],
+                            f"",
+                        ])
+
                     if affected_urls:
                         lines.extend([
                             f"**Affected Pages:**",

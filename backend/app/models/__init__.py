@@ -21,6 +21,7 @@ from app.models.alert import (
     NotificationChannel,
 )
 from app.models.performance import PerformanceSnapshot
+from app.models.usage import TenantUsage
 
 __all__ = [
     "Base",
@@ -61,4 +62,5 @@ __all__ = [
     "AlertEventStatus",
     "NotificationChannel",
     "PerformanceSnapshot",
+    "TenantUsage",
 ]
